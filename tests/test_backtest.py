@@ -18,6 +18,7 @@ def synthetic_prices() -> pd.DataFrame:
         "110020": [1.5 * (1.0003**i) for i in range(n)],
         "050025": [2.0 * (1.0002**i) for i in range(n)],
         "161125": [2.0 * (1.0002**i) for i in range(n)],
+        "006075": [2.0 * (1.0002**i) for i in range(n)],
         "003358": [1.0 * (1.0001**i) for i in range(n)],
         "003327": [1.0 * (1.0001**i) for i in range(n)],
         "000216": [1.2 * (1.00015**i) for i in range(n)],

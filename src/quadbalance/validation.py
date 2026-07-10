@@ -15,10 +15,13 @@ from quadbalance.config import (
     STOCK_SUB_WEIGHTS,
     StrategyConfig,
 )
-from quadbalance.instrument_pool import format_pool_markdown
+from quadbalance.data import PriceMatrixMeta, format_proxy_usage_markdown
+from quadbalance.fees import format_fee_assumptions_markdown
+from quadbalance.instrument_pool import format_pool_markdown, format_qdii_era_markdown
 from quadbalance.metrics import PerformanceMetrics
+from quadbalance.proxy_sensitivity import SensitivitySummary, format_sensitivity_summary_markdown
 from quadbalance.simulator import SimulationResult
-from quadbalance.stress import StressResult
+from quadbalance.stress import S4PathResult, StressResult, format_s4_path_markdown
 
 DISCLAIMER = (
     "Historical performance does not guarantee future results. "
@@ -90,11 +93,61 @@ def evaluate_acceptance(
     )
 
 
+def format_rebalance_execution_markdown(
+    sim_result: SimulationResult, config: StrategyConfig
+) -> str:
+    rm = sim_result.rebalance_metrics
+    if rm is None:
+        return ""
+
+    lines = [
+        "## Rebalance Execution",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Sell shortfall events | {rm.shortfall_event_count} |",
+        f"| Total shortfall amount | {rm.total_shortfall_cny:,.0f} CNY |",
+        f"| Max single shortfall | {rm.max_single_shortfall_cny:,.0f} CNY |",
+        f"| Max post-rebalance deviation | {rm.max_post_rebalance_deviation:.2%} |",
+        "",
+    ]
+
+    if rm.shortfall_event_count > 0:
+        lines.extend(
+            [
+                "### Sell Shortfall Events",
+                "",
+                "| Date | Symbol | Requested | Raised | Shortfall |",
+                "|------|--------|-----------|--------|-----------|",
+            ]
+        )
+        for event in sim_result.rebalance_shortfalls:
+            name = INSTRUMENT_NAMES.get(event.symbol, event.symbol)
+            lines.append(
+                f"| {event.date} | {event.symbol} {name} | "
+                f"{event.requested_cny:,.0f} | {event.raised_cny:,.0f} | "
+                f"{event.shortfall_cny:,.0f} |"
+            )
+        lines.append("")
+
+    if rm.max_post_rebalance_deviation > config.rebalance_threshold:
+        lines.append(
+            f"*Note: post-rebalance quadrant deviation exceeded threshold "
+            f"(±{config.rebalance_threshold:.0%}) in at least one annual rebalance.*"
+        )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def generate_lock_document(
     config: StrategyConfig,
     sim_result: SimulationResult,
     validation: ValidationResult,
     output_path: Path,
+    price_meta: PriceMatrixMeta | None = None,
+    sensitivity_summary: SensitivitySummary | None = None,
+    s4_path: S4PathResult | None = None,
 ) -> None:
     m = validation.metrics
     domestic_sym = next(s for s in STOCK_SUB_WEIGHTS if s != QDII_SYMBOL)
@@ -130,6 +183,7 @@ def generate_lock_document(
         "",
         f"- DCA method: {config.dca_method}",
         f"- Rebalance threshold: ±{config.rebalance_threshold:.0%}",
+        f"- QDII daily caps: {config.qdii_daily_caps}",
         "",
         "## Backtest Period",
         "",
@@ -147,11 +201,50 @@ def generate_lock_document(
         f"| Positive years | {m.positive_years_pct:.0%} |",
         f"| Rebalance premium | {m.rebalance_premium:.2%} |",
         "",
+        format_fee_assumptions_markdown(),
+    ]
+    if sim_result.qdii_metrics is not None:
+        qm = sim_result.qdii_metrics
+        lines.extend(
+            [
+                "## QDII Execution",
+                "",
+                f"| Metric | Value |",
+                f"|--------|-------|",
+                f"| QDII fill rate | {qm.qdii_fill_rate:.1%} |",
+                f"| Avg pending cash | {qm.avg_pending_cash:,.0f} CNY |",
+                f"| Max pending cash | {qm.max_pending_cash:,.0f} CNY |",
+                f"| Days with pending cash | {qm.pending_cash_days} |",
+                f"| Avg QDII weight gap | {qm.avg_qdii_weight_gap:+.2%} |",
+                "",
+            ]
+        )
+        if abs(qm.avg_qdii_weight_gap) > 0.02:
+            lines.append(
+                f"*Note: average QDII weight deviates from target by "
+                f"{qm.avg_qdii_weight_gap:+.2%} of portfolio due to quota limits.*"
+            )
+            lines.append("")
+    lines.append(format_qdii_era_markdown())
+    rebalance_section = format_rebalance_execution_markdown(sim_result, config)
+    if rebalance_section:
+        lines.extend([rebalance_section])
+    if price_meta is not None:
+        proxy_section = format_proxy_usage_markdown(price_meta)
+        if proxy_section:
+            lines.extend([proxy_section])
+    if sensitivity_summary is not None:
+        lines.append(format_sensitivity_summary_markdown(sensitivity_summary))
+    if s4_path is not None:
+        lines.append(format_s4_path_markdown(s4_path))
+    lines.extend(
+        [
         "## Stress Test Summary",
         "",
         "| ID | Scenario | Portfolio Return | Passed |",
         "|----|----------|------------------|--------|",
-    ]
+        ]
+    )
     for sr in validation.stress_results:
         lines.append(
             f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | "

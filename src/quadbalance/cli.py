@@ -21,11 +21,18 @@ def main() -> None:
         action="store_true",
         help="Force re-fetch ETF data from akshare",
     )
+    parser.add_argument(
+        "--full-sensitivity",
+        action="store_true",
+        help="Run proxy sensitivity for all passing configurations (default: locked only)",
+    )
     args = parser.parse_args()
 
     print("Loading data and running parameter sweep...")
     df, validation, config = run_sweep(
-        output_dir=args.output, use_cache=not args.no_cache
+        output_dir=args.output,
+        use_cache=not args.no_cache,
+        full_sensitivity=args.full_sensitivity,
     )
 
     passed = df["validation_passed"].sum()
@@ -36,6 +43,8 @@ def main() -> None:
     if validation and config:
         print(f"Strategy lock document: {args.output / 'strategy-lock.md'}")
         print(f"Locked configuration: {config.config_id}")
+        print(f"Proxy sensitivity: {args.output / 'proxy_sensitivity.csv'}")
+        print(f"Segment metrics: {args.output / 'segment_metrics.csv'}")
     else:
         print("No configuration passed all acceptance criteria.")
         best = df.loc[df["annualized_return"].idxmax()]

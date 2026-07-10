@@ -1,3 +1,5 @@
+import pandas as pd
+
 
 def test_instrument_pool_has_primary_and_backup():
     from quadbalance.instrument_pool import POOLS_BY_KEY, backups
@@ -21,3 +23,15 @@ def test_all_primary_codes_in_config():
         assert code in ALL_INSTRUMENTS
 
     assert QDII_SYMBOL in ALL_INSTRUMENTS
+
+
+def test_qdii_pool_for_date_eras():
+    from quadbalance.instrument_pool import qdii_pool_for_date
+
+    assert qdii_pool_for_date(pd.Timestamp("2015-01-02")) == ["161125"]
+    assert qdii_pool_for_date(pd.Timestamp("2017-06-01")) == ["161125", "050025"]
+    assert qdii_pool_for_date(pd.Timestamp("2019-01-02")) == [
+        "161125",
+        "050025",
+        "006075",
+    ]

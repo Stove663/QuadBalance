@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
+ProxySource = Literal["otc", "etf"]
 
 Quadrant = Literal["stocks", "bonds", "gold", "cash"]
 DcaMethod = Literal["proportional", "underweight"]
@@ -16,11 +18,14 @@ ASSET_CHANNEL: AssetChannel = "otc"
 PRIMARY_START = "2013-01-01"
 BASE_CAPITAL = 1_000_000.0
 MONTHLY_CONTRIBUTION = 10_000.0
-TRANSACTION_COST = 0.001  # 0.1% subscription/redemption fee assumption
+# Deprecated: use quadbalance.fees.purchase_fee_rate / redemption_fee_rate per symbol.
+TRANSACTION_COST = 0.001
 
 # Stocks: domestic CSI 300 feeder + S&P 500 QDII (direct index)
 STOCK_SUB_WEIGHTS = {"110020": 0.6, "161125": 0.4}
 QDII_SYMBOL = "161125"
+ENABLE_QDII_QUOTA = True
+DEFAULT_QDII_DAILY_CAP = 100.0
 
 GOLD_SYMBOL = "000216"
 CASH_SYMBOL = "006874"
@@ -35,10 +40,33 @@ INSTRUMENT_NAMES: dict[str, str] = {
     "110020": "易方达沪深300ETF联接A",
     "161125": "易方达标普500指数（QDII-LOF）A",
     "050025": "博时标普500ETF联接(QDII)A",
+    "006075": "博时标普500ETF联接(QDII)C",
     "003358": "嘉实3-5年国债ETF联接A",
     "003327": "易方达中债7-10年国开行债券指数A",
     "000216": "华安黄金ETF联接A",
     "006874": "泰康现金管家货币A",
+    "070009": "嘉实超短债债券A",
+    "161119": "易方达中债新综合指数（LOF）A",
+    "518880": "华安黄金ETF",
+}
+
+
+@dataclass(frozen=True)
+class BacktestProxy:
+    """Longer-history instrument used before primary fund inception."""
+
+    code: str
+    source: ProxySource
+    note: str
+
+
+# Primary OTC symbol -> backtest proxy (see instrument_pool backup notes)
+BACKTEST_PROXIES: dict[str, BacktestProxy] = {
+    "006874": BacktestProxy("070009", "otc", "Cash proxy before 006874 inception"),
+    "161125": BacktestProxy("050025", "otc", "QDII proxy before 161125 inception"),
+    "003358": BacktestProxy("161119", "otc", "B1 bond proxy before 003358 inception"),
+    "003327": BacktestProxy("161119", "otc", "B2 bond proxy before 003327 inception"),
+    "000216": BacktestProxy("518880", "etf", "Gold proxy before 000216 inception"),
 }
 
 ALLOCATION_VARIANTS: dict[str, tuple[float, float, float, float]] = {
@@ -48,9 +76,14 @@ ALLOCATION_VARIANTS: dict[str, tuple[float, float, float, float]] = {
     "20-25-30-25": (0.20, 0.25, 0.30, 0.25),
 }
 
-ALL_SYMBOLS = sorted(
+QDII_BACKUP_SYMBOLS = ("050025", "006075")
+
+# Alignment set: primaries + bond sweep columns only (no QDII backups).
+PRICE_MATRIX_SYMBOLS = sorted(
     set(STOCK_SUB_WEIGHTS) | {GOLD_SYMBOL, CASH_SYMBOL} | set(BOND_VARIANTS["B3"])
 )
+
+ALL_SYMBOLS = PRICE_MATRIX_SYMBOLS
 
 # Benchmark instruments (场外 feeders aligned with strategy)
 BENCHMARK_CSI300 = "110020"
@@ -69,6 +102,14 @@ class StrategyConfig:
     dca_method: DcaMethod
     rebalance_threshold: float
     qdii_premium: float = 0.0
+    enable_qdii_quota: bool = ENABLE_QDII_QUOTA
+    qdii_daily_caps: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.qdii_daily_caps:
+            from quadbalance.instrument_pool import default_qdii_daily_caps
+
+            object.__setattr__(self, "qdii_daily_caps", default_qdii_daily_caps())
 
     @property
     def config_id(self) -> str:
@@ -102,8 +143,24 @@ class StrategyConfig:
         syms.extend([GOLD_SYMBOL, CASH_SYMBOL])
         return sorted(set(syms))
 
+    def simulation_symbols(self) -> list[str]:
+        syms = set(self.symbols())
+        if self.enable_qdii_quota:
+            from quadbalance.instrument_pool import qdii_pool_codes
+
+            syms.update(qdii_pool_codes())
+        return sorted(syms)
+
+    def is_qdii_symbol(self, symbol: str) -> bool:
+        from quadbalance.instrument_pool import qdii_pool_codes
+
+        return symbol in qdii_pool_codes()
+
+    def qdii_target_weight(self) -> float:
+        return self.stocks * STOCK_SUB_WEIGHTS[QDII_SYMBOL]
+
     def quadrant_for_symbol(self, symbol: str) -> Quadrant:
-        if symbol in STOCK_SUB_WEIGHTS:
+        if symbol in STOCK_SUB_WEIGHTS or self.is_qdii_symbol(symbol):
             return "stocks"
         if symbol in BOND_VARIANTS[self.bond_variant]:
             return "bonds"

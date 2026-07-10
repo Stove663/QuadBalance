@@ -3,16 +3,37 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import akshare as ak
 import pandas as pd
 
-from quadbalance.config import ALL_SYMBOLS, PRIMARY_START
+from quadbalance.config import (
+    BACKTEST_PROXIES,
+    INSTRUMENT_NAMES,
+    PRICE_MATRIX_SYMBOLS,
+    PRIMARY_START,
+    QDII_BACKUP_SYMBOLS,
+    BacktestProxy,
+)
 
 CACHE_DIR = Path(".cache")
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+
+
+@dataclass(frozen=True)
+class BacktestProxyUsage:
+    primary: str
+    proxy: str
+    proxy_start: str
+    handoff: str
+
+
+@dataclass(frozen=True)
+class PriceMatrixMeta:
+    proxy_usage: tuple[BacktestProxyUsage, ...]
 
 
 def _cache_path(symbol: str) -> Path:
@@ -92,24 +113,210 @@ def fetch_prices(symbol: str, use_cache: bool = True) -> pd.Series:
     return fetch_etf_prices(symbol, use_cache=use_cache)
 
 
+def _fetch_proxy_prices(proxy: BacktestProxy, use_cache: bool = True) -> pd.Series:
+    if proxy.source == "etf":
+        return fetch_etf_prices(proxy.code, use_cache=use_cache)
+    return fetch_otc_fund_nav(proxy.code, use_cache=use_cache)
+
+
+def stitch_with_proxy(
+    primary: pd.Series,
+    proxy: pd.Series,
+) -> tuple[pd.Series, BacktestProxyUsage | None]:
+    """Splice scaled proxy history before primary fund inception."""
+    primary = primary.dropna().sort_index()
+    proxy = proxy.dropna().sort_index()
+    if primary.empty:
+        if proxy.empty:
+            raise ValueError("Both primary and proxy price series are empty")
+        return proxy, BacktestProxyUsage(
+            primary="",
+            proxy=proxy.name or "",
+            proxy_start=proxy.index[0].strftime("%Y-%m-%d"),
+            handoff=proxy.index[0].strftime("%Y-%m-%d"),
+        )
+
+    handoff = primary.index[0]
+    proxy_hist = proxy[proxy.index < handoff]
+    if proxy_hist.empty:
+        return primary, None
+
+    scale = primary.iloc[0] / proxy_hist.iloc[-1]
+    scaled = proxy_hist * scale
+    stitched = pd.concat([scaled, primary])
+    stitched = stitched[~stitched.index.duplicated(keep="last")].sort_index()
+    stitched.name = primary.name
+    return stitched, BacktestProxyUsage(
+        primary=str(primary.name or ""),
+        proxy=str(proxy.name or ""),
+        proxy_start=proxy_hist.index[0].strftime("%Y-%m-%d"),
+        handoff=handoff.strftime("%Y-%m-%d"),
+    )
+
+
+def load_backtest_prices(
+    symbol: str,
+    use_cache: bool = True,
+) -> tuple[pd.Series, BacktestProxyUsage | None]:
+    """Load prices for backtest, stitching a longer-history proxy when configured."""
+    primary = fetch_prices(symbol, use_cache=use_cache)
+    primary.name = symbol
+    proxy_cfg = BACKTEST_PROXIES.get(symbol)
+    if proxy_cfg is None:
+        return primary, None
+
+    proxy = _fetch_proxy_prices(proxy_cfg, use_cache=use_cache)
+    proxy.name = proxy_cfg.code
+    stitched, usage = stitch_with_proxy(primary, proxy)
+    if usage is not None:
+        usage = BacktestProxyUsage(
+            primary=symbol,
+            proxy=proxy_cfg.code,
+            proxy_start=usage.proxy_start,
+            handoff=usage.handoff,
+        )
+    return stitched, usage
+
+
+def perturb_price_segment(
+    series: pd.Series,
+    end_exclusive: pd.Timestamp,
+    annual_drift: float,
+) -> pd.Series:
+    """Apply constant annualized drift to dates strictly before end_exclusive.
+
+    Rescales the proxy segment so the last pre-handoff price is unchanged,
+    preserving stitch continuity at the handoff boundary.
+    """
+    if annual_drift == 0.0:
+        return series
+
+    series = series.sort_index().copy()
+    mask = series.index < end_exclusive
+    if not mask.any():
+        return series
+
+    proxy_part = series.loc[mask]
+    daily_factor = (1.0 + annual_drift) ** (1.0 / 252.0)
+    perturbed = proxy_part.copy()
+    values = [proxy_part.iloc[0]]
+    for i in range(1, len(proxy_part)):
+        prev = values[-1]
+        ret = proxy_part.iloc[i] / proxy_part.iloc[i - 1] - 1.0
+        values.append(prev * (1.0 + ret) * daily_factor)
+
+    perturbed.iloc[:] = values
+    if perturbed.iloc[-1] != 0:
+        perturbed *= proxy_part.iloc[-1] / perturbed.iloc[-1]
+
+    result = series.copy()
+    result.loc[mask] = perturbed
+    return result
+
+
+def build_perturbed_from_baseline(
+    baseline_prices: pd.DataFrame,
+    meta: PriceMatrixMeta,
+    primary_symbol: str,
+    annual_drift: float,
+) -> pd.DataFrame:
+    """Apply drift to one proxy segment using an existing price matrix."""
+    if annual_drift == 0.0 or primary_symbol not in baseline_prices.columns:
+        return baseline_prices
+
+    usage = next((u for u in meta.proxy_usage if u.primary == primary_symbol), None)
+    if usage is None:
+        return baseline_prices
+
+    handoff = pd.Timestamp(usage.handoff)
+    perturbed = baseline_prices.copy()
+    perturbed[primary_symbol] = perturb_price_segment(
+        baseline_prices[primary_symbol], handoff, annual_drift
+    )
+    return perturbed
+
+
+def build_perturbed_price_matrix(
+    primary_symbol: str,
+    annual_drift: float,
+    symbols: list[str] | None = None,
+    start: str = PRIMARY_START,
+    use_cache: bool = True,
+) -> tuple[pd.DataFrame, PriceMatrixMeta]:
+    """Rebuild price matrix with drift applied to one proxy mapping only."""
+    prices, meta = load_price_matrix_with_meta(
+        symbols=symbols, start=start, use_cache=use_cache
+    )
+    return build_perturbed_from_baseline(prices, meta, primary_symbol, annual_drift), meta
+
+
+def load_backup_prices(
+    symbols: tuple[str, ...] | None = None,
+    use_cache: bool = True,
+) -> dict[str, pd.Series]:
+    """Load QDII backup prices independently of the alignment matrix."""
+    symbols = symbols or QDII_BACKUP_SYMBOLS
+    result: dict[str, pd.Series] = {}
+    for sym in symbols:
+        prices, _ = load_backtest_prices(sym, use_cache=use_cache)
+        result[sym] = prices
+    return result
+
+
 def load_price_matrix(
     symbols: list[str] | None = None,
     start: str = PRIMARY_START,
     use_cache: bool = True,
 ) -> pd.DataFrame:
     """Load aligned close/NAV prices for all symbols."""
-    symbols = symbols or ALL_SYMBOLS
+    prices, _ = load_price_matrix_with_meta(symbols=symbols, start=start, use_cache=use_cache)
+    return prices
+
+
+def load_price_matrix_with_meta(
+    symbols: list[str] | None = None,
+    start: str = PRIMARY_START,
+    use_cache: bool = True,
+) -> tuple[pd.DataFrame, PriceMatrixMeta]:
+    """Load aligned prices and record any backtest proxy stitching."""
+    symbols = symbols or PRICE_MATRIX_SYMBOLS
     series_map: dict[str, pd.Series] = {}
+    proxy_usage: list[BacktestProxyUsage] = []
     start_ts = pd.Timestamp(start)
 
     for i, sym in enumerate(symbols):
         if i > 0:
             time.sleep(0.5)
-        prices = fetch_prices(sym, use_cache=use_cache)
+        prices, usage = load_backtest_prices(sym, use_cache=use_cache)
         series_map[sym] = prices[prices.index >= start_ts]
+        if usage is not None:
+            proxy_usage.append(usage)
 
     prices = pd.DataFrame(series_map).sort_index().ffill().dropna(how="any")
-    return prices
+    return prices, PriceMatrixMeta(proxy_usage=tuple(proxy_usage))
+
+
+def format_proxy_usage_markdown(meta: PriceMatrixMeta) -> str:
+    """Render backtest proxy stitching notes for reports."""
+    if not meta.proxy_usage:
+        return ""
+    lines = [
+        "## Backtest Proxies",
+        "",
+        "Longer-history instruments used before primary fund inception:",
+        "",
+        "| Primary | Proxy | Proxy Period | Handoff to Primary |",
+        "|---------|-------|--------------|--------------------|",
+    ]
+    for usage in meta.proxy_usage:
+        primary_name = INSTRUMENT_NAMES.get(usage.primary, usage.primary)
+        proxy_name = INSTRUMENT_NAMES.get(usage.proxy, usage.proxy)
+        lines.append(
+            f"| {usage.primary} {primary_name} | {usage.proxy} {proxy_name} | "
+            f"{usage.proxy_start} → {usage.handoff} | {usage.handoff} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def instrument_start_dates(prices: pd.DataFrame) -> dict[str, str]:

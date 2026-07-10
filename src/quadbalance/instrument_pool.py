@@ -11,9 +11,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from quadbalance.config import Quadrant
+import pandas as pd
+
+from quadbalance.config import (
+    BACKTEST_PROXIES,
+    DEFAULT_QDII_DAILY_CAP,
+    QDII_SYMBOL,
+    Quadrant,
+)
 
 QuotaRisk = Literal["low", "medium", "high"]
+
+
+@dataclass(frozen=True)
+class TradeFees:
+    """Machine-readable trade fee rates (decimal, e.g. 0.0012 = 0.12%)."""
+
+    purchase_rate: float
+    redemption_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -29,10 +44,25 @@ class FundInstrument:
     tracking_note: str
     quota_risk: QuotaRisk
     notes: str
+    trade_fees: TradeFees
 
     @property
     def is_primary(self) -> bool:
         return self.role == "primary"
+
+
+# v1 backtest fee rates (1-discount platform assumptions; redemption 0% long-hold)
+_FEE_STOCK_A = TradeFees(0.0012)
+_FEE_STOCK_C = TradeFees(0.0)
+_FEE_QDII_A = TradeFees(0.0012)
+_FEE_QDII_BACKUP_A = TradeFees(0.0010)
+_FEE_QDII_C = TradeFees(0.0)
+_FEE_BOND_B1 = TradeFees(0.0006)
+_FEE_BOND_B2 = TradeFees(0.0008)
+_FEE_GOLD_A = TradeFees(0.0006)
+_FEE_GOLD_C = TradeFees(0.0)
+_FEE_CASH = TradeFees(0.0)
+_FEE_CASH_PROXY = TradeFees(0.0004)
 
 
 # --- Stocks: domestic (60% of stocks quadrant) ---
@@ -50,6 +80,7 @@ STOCKS_DOMESTIC_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接510300，规模大、流动性好，跟踪沪深300",
         quota_risk="low",
         notes="默认主选；大额一次性买入选A类",
+        trade_fees=_FEE_STOCK_A,
     ),
     FundInstrument(
         code="005658",
@@ -63,6 +94,7 @@ STOCKS_DOMESTIC_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接510330，跟踪误差同类领先",
         quota_risk="low",
         notes="长期定投备选；持有>30天通常免赎回费",
+        trade_fees=_FEE_STOCK_C,
     ),
     FundInstrument(
         code="000051",
@@ -76,6 +108,7 @@ STOCKS_DOMESTIC_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接510330，历史长（2009）",
         quota_risk="low",
         notes="平台缺 110020 时使用",
+        trade_fees=_FEE_STOCK_A,
     ),
 )
 
@@ -94,6 +127,7 @@ STOCKS_QDII_POOL: tuple[FundInstrument, ...] = (
         tracking_note="直接复制标普500，年化跟踪误差约0.3%，优于双层联接",
         quota_risk="high",
         notes="当前锁定主选；限购常见（常100元/日）",
+        trade_fees=_FEE_QDII_A,
     ),
     FundInstrument(
         code="050025",
@@ -107,6 +141,7 @@ STOCKS_QDII_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接513500，双层结构跟踪略逊于161125",
         quota_risk="high",
         notes="161125额度不足时使用",
+        trade_fees=_FEE_QDII_BACKUP_A,
     ),
     FundInstrument(
         code="006075",
@@ -120,6 +155,7 @@ STOCKS_QDII_POOL: tuple[FundInstrument, ...] = (
         tracking_note="同050025标的，C类持有成本低",
         quota_risk="high",
         notes="长期定投备选；与050025共享QDII额度",
+        trade_fees=_FEE_QDII_C,
     ),
 )
 
@@ -138,6 +174,7 @@ BONDS_B1_POOL: tuple[FundInstrument, ...] = (
         tracking_note="跟踪3-5年国债指数，对应511010逻辑",
         quota_risk="low",
         notes="B1默认主选",
+        trade_fees=_FEE_BOND_B1,
     ),
     FundInstrument(
         code="161119",
@@ -151,6 +188,7 @@ BONDS_B1_POOL: tuple[FundInstrument, ...] = (
         tracking_note="中债新综合全价指数，久期略长于3-5年",
         quota_risk="low",
         notes="003358暂停申购时的宽基国债替代",
+        trade_fees=_FEE_BOND_B2,
     ),
 )
 
@@ -169,6 +207,7 @@ BONDS_B2_POOL: tuple[FundInstrument, ...] = (
         tracking_note="跟踪7-10年国开债，对应511260逻辑",
         quota_risk="low",
         notes="B2默认主选",
+        trade_fees=_FEE_BOND_B2,
     ),
     FundInstrument(
         code="161716",
@@ -182,6 +221,7 @@ BONDS_B2_POOL: tuple[FundInstrument, ...] = (
         tracking_note="国债+企债增强，非纯指数，波动略高",
         quota_risk="low",
         notes="纯指数不可用时；接受略高信用敞口",
+        trade_fees=_FEE_BOND_B2,
     ),
 )
 
@@ -200,6 +240,7 @@ GOLD_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接518880，跟踪国内黄金现货",
         quota_risk="low",
         notes="默认主选",
+        trade_fees=_FEE_GOLD_A,
     ),
     FundInstrument(
         code="002963",
@@ -213,6 +254,7 @@ GOLD_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接1024，跟踪误差小",
         quota_risk="low",
         notes="长期定投备选",
+        trade_fees=_FEE_GOLD_C,
     ),
     FundInstrument(
         code="000218",
@@ -226,6 +268,7 @@ GOLD_POOL: tuple[FundInstrument, ...] = (
         tracking_note="联接518800",
         quota_risk="low",
         notes="第三备选",
+        trade_fees=_FEE_GOLD_A,
     ),
 )
 
@@ -244,6 +287,7 @@ CASH_POOL: tuple[FundInstrument, ...] = (
         tracking_note="货币市场基金，7日年化收益稳定",
         quota_risk="low",
         notes="默认主选；申赎T+1",
+        trade_fees=_FEE_CASH,
     ),
     FundInstrument(
         code="070009",
@@ -257,6 +301,7 @@ CASH_POOL: tuple[FundInstrument, ...] = (
         tracking_note="超短债，波动极低，近似现金",
         quota_risk="low",
         notes="货币基金额度紧张时；历史数据长（回测代理）",
+        trade_fees=_FEE_CASH_PROXY,
     ),
 )
 
@@ -272,6 +317,11 @@ POOLS_BY_KEY: dict[str, tuple[FundInstrument, ...]] = {
 ALL_INSTRUMENTS: dict[str, FundInstrument] = {
     f.code: f for pool in POOLS_BY_KEY.values() for f in pool
 }
+
+
+def primary_instruments() -> list[FundInstrument]:
+    """Return primary instrument per pool."""
+    return [next(f for f in pool if f.is_primary) for pool in POOLS_BY_KEY.values()]
 
 
 def pool_for_quadrant(quadrant: Quadrant, bond_variant: str = "B1") -> list[FundInstrument]:
@@ -293,6 +343,70 @@ def primary_code(pool_key: str) -> str:
 def backups(pool_key: str) -> list[FundInstrument]:
     pool = POOLS_BY_KEY[pool_key]
     return sorted([f for f in pool if not f.is_primary], key=lambda f: f.rank)
+
+
+def qdii_pool_codes() -> list[str]:
+    """Return QDII instruments in ranked order (primary first)."""
+    return [f.code for f in sorted(STOCKS_QDII_POOL, key=lambda x: x.rank)]
+
+
+_INSTRUMENT_INCEPTION_FALLBACK: dict[str, str] = {
+    QDII_SYMBOL: "2016-12-02",
+    "050025": "2016-12-02",
+    "006075": "2018-06-08",
+}
+
+
+def primary_qdii_handoff_date() -> pd.Timestamp:
+    """First date the primary QDII column uses live NAV (post proxy stitch)."""
+    if QDII_SYMBOL not in BACKTEST_PROXIES:
+        return pd.Timestamp(_INSTRUMENT_INCEPTION_FALLBACK[QDII_SYMBOL])
+    return pd.Timestamp(_INSTRUMENT_INCEPTION_FALLBACK[QDII_SYMBOL])
+
+
+def instrument_inception_dates() -> dict[str, str]:
+    """Fallback inception dates for QDII simulation gating."""
+    return dict(_INSTRUMENT_INCEPTION_FALLBACK)
+
+
+def qdii_backup_inception_date(symbol: str) -> pd.Timestamp:
+    if symbol not in _INSTRUMENT_INCEPTION_FALLBACK:
+        raise KeyError(f"No inception date for QDII symbol {symbol}")
+    return pd.Timestamp(_INSTRUMENT_INCEPTION_FALLBACK[symbol])
+
+
+def qdii_pool_for_date(dt: pd.Timestamp) -> list[str]:
+    """Active QDII tradable pool for a simulation date."""
+    handoff = primary_qdii_handoff_date()
+    if dt < handoff:
+        return [QDII_SYMBOL]
+    pool = [QDII_SYMBOL, "050025"]
+    if dt >= qdii_backup_inception_date("006075"):
+        pool.append("006075")
+    return pool
+
+
+def format_qdii_era_markdown() -> str:
+    """QDII simulation era boundaries for strategy-lock reporting."""
+    handoff = primary_qdii_handoff_date().strftime("%Y-%m-%d")
+    youngest = qdii_backup_inception_date("006075").strftime("%Y-%m-%d")
+    return "\n".join(
+        [
+            "## QDII Simulation Eras",
+            "",
+            "| Era | Dates | Tradable Pool | Quota Enforcement |",
+            "|-----|-------|---------------|-------------------|",
+            f"| Proxy | before {handoff} | 161125 (proxy-stitched) | Disabled |",
+            f"| Primary + backup | {handoff} – day before {youngest} | 161125, 050025 | Enabled |",
+            f"| Full pool | {youngest} onward | 161125, 050025, 006075 | Enabled |",
+            "",
+        ]
+    )
+
+
+def default_qdii_daily_caps() -> dict[str, float]:
+    """Default simulated daily subscription caps per QDII instrument."""
+    return {code: DEFAULT_QDII_DAILY_CAP for code in qdii_pool_codes()}
 
 
 def select_on_quota_unavailable(pool_key: str) -> list[FundInstrument]:
