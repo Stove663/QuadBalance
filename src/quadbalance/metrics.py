@@ -12,6 +12,13 @@ from quadbalance.simulator import SimulationResult, simulate
 
 
 @dataclass
+class ProfileSuitability:
+    profile_id: str
+    classification: str
+    reasons: list[str]
+
+
+@dataclass
 class PerformanceMetrics:
     annualized_return: float
     annualized_volatility: float
@@ -23,6 +30,15 @@ class PerformanceMetrics:
     rebalance_premium: float
     worst_year_return: float
     annual_returns: pd.Series
+    real_annualized_return: float = 0.0
+    real_terminal_wealth: float = 0.0
+    worst_rolling_1y_return: float = 0.0
+    worst_rolling_3y_return: float = 0.0
+    worst_rolling_5y_return: float = 0.0
+    worst_rolling_1y_real_return: float = 0.0
+    worst_rolling_3y_real_return: float = 0.0
+    worst_rolling_5y_real_return: float = 0.0
+    longest_underwater_days: int = 0
 
 
 def _annual_returns(daily_values: pd.Series) -> pd.Series:
@@ -40,12 +56,33 @@ def _max_drawdown(daily_values: pd.Series) -> tuple[float, str, str]:
     return float(drawdown.min()), peak_idx.strftime("%Y-%m-%d"), trough_idx.strftime("%Y-%m-%d")
 
 
+def _worst_rolling_return(daily_values: pd.Series, window: int) -> float:
+    if len(daily_values) < window + 1:
+        return 0.0
+    rolling = daily_values.pct_change(window).dropna()
+    return float(rolling.min()) if len(rolling) else 0.0
+
+
+def _longest_underwater_days(daily_values: pd.Series) -> int:
+    peak = daily_values.cummax()
+    underwater = daily_values < peak
+    longest = current = 0
+    for flag in underwater:
+        if flag:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
 def compute_metrics(
     result: SimulationResult,
     config: StrategyConfig,
     prices: pd.DataFrame,
     risk_free_annual: float,
     no_rebalance_result: SimulationResult | None = None,
+    inflation_annual: float = 0.03,
 ) -> PerformanceMetrics:
     daily = result.daily_values
     daily_returns = daily.pct_change().dropna()
@@ -70,6 +107,10 @@ def compute_metrics(
         nr_ann = (1 + nr_total) ** (1 / nr_years) - 1 if nr_years > 0 else 0.0
         rebalance_premium = ann_return - nr_ann
 
+    real_factor = (1.0 + inflation_annual) ** years if years > 0 else 1.0
+    real_terminal = daily.iloc[-1] / real_factor if real_factor > 0 else daily.iloc[-1]
+    real_ann_return = ((1 + ann_return) / (1 + inflation_annual) - 1) if inflation_annual > -1 else ann_return
+
     return PerformanceMetrics(
         annualized_return=ann_return,
         annualized_volatility=ann_vol,
@@ -81,7 +122,65 @@ def compute_metrics(
         rebalance_premium=rebalance_premium,
         worst_year_return=worst_year,
         annual_returns=annual_rets,
+        real_annualized_return=real_ann_return,
+        real_terminal_wealth=real_terminal,
+        worst_rolling_1y_return=_worst_rolling_return(daily, 252),
+        worst_rolling_3y_return=_worst_rolling_return(daily, 252 * 3),
+        worst_rolling_5y_return=_worst_rolling_return(daily, 252 * 5),
+        worst_rolling_1y_real_return=_worst_rolling_return(daily, 252),
+        worst_rolling_3y_real_return=_worst_rolling_return(daily, 252 * 3),
+        worst_rolling_5y_real_return=_worst_rolling_return(daily, 252 * 5),
+        longest_underwater_days=_longest_underwater_days(daily),
     )
+
+
+def classify_suitability(
+    config: StrategyConfig,
+    metrics: PerformanceMetrics,
+    qdii_fill_rate: float,
+    avg_qdii_weight_gap: float,
+) -> dict[str, ProfileSuitability]:
+    profiles: dict[str, ProfileSuitability] = {}
+
+    accumulation_reasons: list[str] = []
+    if metrics.real_annualized_return > 0:
+        accumulation_reasons.append("positive real annualized return")
+    if metrics.annualized_return < 0.06:
+        accumulation_reasons.append("modest nominal growth may be too defensive for accumulation")
+    if metrics.worst_rolling_5y_real_return < 0:
+        accumulation_reasons.append("5-year rolling real return can fall below zero")
+    if qdii_fill_rate < 0.9 or avg_qdii_weight_gap < -0.02:
+        accumulation_reasons.append("QDII execution friction reduces global equity exposure")
+    accumulation_class = "suitable" if metrics.real_annualized_return > 0.02 and metrics.max_drawdown > -0.25 else "caution"
+    if metrics.worst_rolling_5y_real_return < -0.10:
+        accumulation_class = "unsuitable"
+    profiles["accumulation"] = ProfileSuitability("accumulation", accumulation_class, accumulation_reasons)
+
+    balanced_reasons = []
+    if metrics.max_drawdown > -0.25:
+        balanced_reasons.append("drawdown within moderate tolerance")
+    if metrics.real_annualized_return > 0:
+        balanced_reasons.append("preserves purchasing power on average")
+    balanced_class = "suitable" if metrics.max_drawdown >= -0.25 and metrics.worst_rolling_5y_real_return > -0.10 else "caution"
+    profiles["balanced_core"] = ProfileSuitability("balanced_core", balanced_class, balanced_reasons)
+
+    pre_retire_reasons = []
+    if metrics.longest_underwater_days > 252 * 3:
+        pre_retire_reasons.append("extended underwater duration is risky near retirement")
+    if qdii_fill_rate < 0.75:
+        pre_retire_reasons.append("execution friction can worsen liquidity planning")
+    pre_retire_class = "unsuitable" if metrics.max_drawdown < -0.30 or metrics.longest_underwater_days > 252 * 5 else "caution"
+    profiles["pre_retirement_preservation"] = ProfileSuitability("pre_retirement_preservation", pre_retire_class, pre_retire_reasons)
+
+    retirement_reasons = []
+    if metrics.worst_rolling_5y_real_return < -0.10:
+        retirement_reasons.append("5-year real return breach threatens purchasing power")
+    if metrics.longest_underwater_days > 252 * 5:
+        retirement_reasons.append("underwater duration too long for withdrawal phase")
+    retirement_class = "unsuitable" if metrics.real_terminal_wealth <= 0 or metrics.max_drawdown < -0.30 else "caution"
+    profiles["retirement_withdrawal"] = ProfileSuitability("retirement_withdrawal", retirement_class, retirement_reasons)
+
+    return profiles
 
 
 def cash_risk_free_rate(prices: pd.DataFrame) -> float:

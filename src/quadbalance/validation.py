@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+
+import pandas as pd
 
 from quadbalance.benchmarks import BenchmarkResult
 from quadbalance.config import (
@@ -20,7 +22,7 @@ from quadbalance.fees import format_fee_assumptions_markdown
 from quadbalance.instrument_pool import format_pool_markdown, format_qdii_era_markdown
 from quadbalance.metrics import PerformanceMetrics
 from quadbalance.proxy_sensitivity import SensitivitySummary, format_sensitivity_summary_markdown
-from quadbalance.simulator import SimulationResult
+from quadbalance.simulator import LifecycleResult, SimulationResult, simulate_lifecycle
 from quadbalance.stress import S4PathResult, StressResult, format_s4_path_markdown
 
 DISCLAIMER = (
@@ -37,6 +39,9 @@ class ValidationResult:
     metrics: PerformanceMetrics
     benchmark_comparison: dict[str, dict[str, float]]
     stress_results: list[StressResult]
+    boundary_classifications: dict[str, str] = field(default_factory=dict)
+    lifecycle_results: list[LifecycleResult] = field(default_factory=list)
+    profile_suitability: dict[str, dict[str, list[str] | str]] = field(default_factory=dict)
 
 
 def evaluate_acceptance(
@@ -51,9 +56,7 @@ def evaluate_acceptance(
         failures.append(f"Criterion 1: max drawdown {metrics.max_drawdown:.1%} > 25%")
 
     if metrics.worst_year_return < -0.20:
-        failures.append(
-            f"Criterion 2: worst year {metrics.worst_year_return:.1%} < -20%"
-        )
+        failures.append(f"Criterion 2: worst year {metrics.worst_year_return:.1%} < -20%")
 
     for sr in stress_results:
         if not sr.passed:
@@ -62,18 +65,14 @@ def evaluate_acceptance(
     cash_bench = benchmarks["cash"]
     if metrics.annualized_return < cash_bench.annualized_return + 0.02:
         failures.append(
-            f"Criterion 4: return {metrics.annualized_return:.1%} "
-            f"does not exceed cash benchmark by 2%"
+            f"Criterion 4: return {metrics.annualized_return:.1%} does not exceed cash benchmark by 2%"
         )
 
     bench_6040 = benchmarks["60_40"]
     return_ok = metrics.annualized_return >= bench_6040.annualized_return - 0.02
     drawdown_ok = metrics.max_drawdown > bench_6040.max_drawdown + 0.05
     if not (return_ok or drawdown_ok):
-        failures.append(
-            "Criterion 5: neither within 2% of 60/40 return "
-            "nor 5% lower max drawdown"
-        )
+        failures.append("Criterion 5: neither within 2% of 60/40 return nor 5% lower max drawdown")
 
     comp = {
         key: {
@@ -83,19 +82,16 @@ def evaluate_acceptance(
         for key, b in benchmarks.items()
     }
 
-    return ValidationResult(
-        config_id=config.config_id,
-        passed=len(failures) == 0,
-        failure_reasons=failures,
-        metrics=metrics,
-        benchmark_comparison=comp,
-        stress_results=stress_results,
-    )
+    boundary = {
+        "macro": "review-required" if any(sr.scenario_id in {"S8", "S9", "S10", "S11", "S12"} and not sr.passed for sr in stress_results) else "normal",
+        "behavioral": "thesis-broken" if metrics.longest_underwater_days > 252 * 5 else ("review-required" if metrics.longest_underwater_days > 252 * 3 else "normal"),
+        "real_return": "thesis-broken" if metrics.worst_rolling_5y_real_return < -0.10 else ("review-required" if metrics.worst_rolling_3y_real_return < 0 else "normal"),
+    }
+
+    return ValidationResult(config.config_id, len(failures) == 0, failures, metrics, comp, stress_results, boundary)
 
 
-def format_rebalance_execution_markdown(
-    sim_result: SimulationResult, config: StrategyConfig
-) -> str:
+def format_rebalance_execution_markdown(sim_result: SimulationResult, config: StrategyConfig) -> str:
     rm = sim_result.rebalance_metrics
     if rm is None:
         return ""
@@ -111,32 +107,37 @@ def format_rebalance_execution_markdown(
         f"| Max post-rebalance deviation | {rm.max_post_rebalance_deviation:.2%} |",
         "",
     ]
+    return "\n".join(lines)
 
-    if rm.shortfall_event_count > 0:
-        lines.extend(
-            [
-                "### Sell Shortfall Events",
-                "",
-                "| Date | Symbol | Requested | Raised | Shortfall |",
-                "|------|--------|-----------|--------|-----------|",
-            ]
-        )
-        for event in sim_result.rebalance_shortfalls:
-            name = INSTRUMENT_NAMES.get(event.symbol, event.symbol)
-            lines.append(
-                f"| {event.date} | {event.symbol} {name} | "
-                f"{event.requested_cny:,.0f} | {event.raised_cny:,.0f} | "
-                f"{event.shortfall_cny:,.0f} |"
-            )
-        lines.append("")
 
-    if rm.max_post_rebalance_deviation > config.rebalance_threshold:
+def _boundary_summary(validation: ValidationResult) -> str:
+    lines = ["## Strategy Boundary Summary", "", "| Boundary | Classification |", "|----------|----------------|"]
+    for key, value in validation.boundary_classifications.items():
+        lines.append(f"| {key} | {value} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _lifecycle_summary(lifecycle_results: list[LifecycleResult]) -> str:
+    if not lifecycle_results:
+        return ""
+    lines = ["## Lifecycle Stress Tests", "", "| Scenario | Terminal Value | Real Terminal Value | Max Drawdown | Depleted | Recovery Days |", "|----------|----------------|---------------------|--------------|----------|---------------|"]
+    for lr in lifecycle_results:
         lines.append(
-            f"*Note: post-rebalance quadrant deviation exceeded threshold "
-            f"(±{config.rebalance_threshold:.0%}) in at least one annual rebalance.*"
+            f"| {lr.scenario_id} | {lr.terminal_value:,.0f} | {lr.real_terminal_value:,.0f} | {lr.max_drawdown:.2%} | {'✓' if lr.depleted else '✗'} | {lr.recovery_days} |"
         )
-        lines.append("")
+    lines.append("")
+    return "\n".join(lines)
 
+
+def _profile_suitability_summary(validation: ValidationResult) -> str:
+    if not validation.profile_suitability:
+        return ""
+    lines = ["## Investor Profile Suitability", "", "| Profile | Classification | Key Reasons |", "|---------|----------------|-------------|"]
+    for profile, payload in validation.profile_suitability.items():
+        reasons = "; ".join(payload.get("reasons", [])) or "—"
+        lines.append(f"| {profile} | {payload.get('classification', 'caution')} | {reasons} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -171,10 +172,7 @@ def generate_lock_document(
         "",
         "## Primary Instruments (场外)",
         "",
-        f"- Stocks: {STOCK_SUB_WEIGHTS[domestic_sym]:.0%} {domestic_sym} "
-        f"{INSTRUMENT_NAMES[domestic_sym]}, "
-        f"{STOCK_SUB_WEIGHTS[QDII_SYMBOL]:.0%} {QDII_SYMBOL} "
-        f"{INSTRUMENT_NAMES[QDII_SYMBOL]}",
+        f"- Stocks: {STOCK_SUB_WEIGHTS[domestic_sym]:.0%} {domestic_sym} {INSTRUMENT_NAMES[domestic_sym]}, {STOCK_SUB_WEIGHTS[QDII_SYMBOL]:.0%} {QDII_SYMBOL} {INSTRUMENT_NAMES[QDII_SYMBOL]}",
         f"- Bonds: {config.bond_variant} variant",
         f"- Gold: {GOLD_SYMBOL} {INSTRUMENT_NAMES[GOLD_SYMBOL]}",
         f"- Cash: {CASH_SYMBOL} {INSTRUMENT_NAMES[CASH_SYMBOL]}",
@@ -200,31 +198,16 @@ def generate_lock_document(
         f"| Sharpe ratio | {m.sharpe_ratio:.2f} |",
         f"| Positive years | {m.positive_years_pct:.0%} |",
         f"| Rebalance premium | {m.rebalance_premium:.2%} |",
+        f"| Real annualized return | {m.real_annualized_return:.2%} |",
+        f"| Real terminal wealth | {m.real_terminal_wealth:,.0f} |",
+        f"| Worst rolling 3y real return | {m.worst_rolling_3y_real_return:.2%} |",
+        f"| Longest underwater days | {m.longest_underwater_days} |",
         "",
         format_fee_assumptions_markdown(),
     ]
     if sim_result.qdii_metrics is not None:
         qm = sim_result.qdii_metrics
-        lines.extend(
-            [
-                "## QDII Execution",
-                "",
-                f"| Metric | Value |",
-                f"|--------|-------|",
-                f"| QDII fill rate | {qm.qdii_fill_rate:.1%} |",
-                f"| Avg pending cash | {qm.avg_pending_cash:,.0f} CNY |",
-                f"| Max pending cash | {qm.max_pending_cash:,.0f} CNY |",
-                f"| Days with pending cash | {qm.pending_cash_days} |",
-                f"| Avg QDII weight gap | {qm.avg_qdii_weight_gap:+.2%} |",
-                "",
-            ]
-        )
-        if abs(qm.avg_qdii_weight_gap) > 0.02:
-            lines.append(
-                f"*Note: average QDII weight deviates from target by "
-                f"{qm.avg_qdii_weight_gap:+.2%} of portfolio due to quota limits.*"
-            )
-            lines.append("")
+        lines.extend(["## QDII Execution", "", f"| Metric | Value |", f"|--------|-------|", f"| QDII fill rate | {qm.qdii_fill_rate:.1%} |", f"| Avg pending cash | {qm.avg_pending_cash:,.0f} CNY |", f"| Max pending cash | {qm.max_pending_cash:,.0f} CNY |", f"| Days with pending cash | {qm.pending_cash_days} |", f"| Avg QDII weight gap | {qm.avg_qdii_weight_gap:+.2%} |", ""])
     lines.append(format_qdii_era_markdown())
     rebalance_section = format_rebalance_execution_markdown(sim_result, config)
     if rebalance_section:
@@ -237,19 +220,27 @@ def generate_lock_document(
         lines.append(format_sensitivity_summary_markdown(sensitivity_summary))
     if s4_path is not None:
         lines.append(format_s4_path_markdown(s4_path))
-    lines.extend(
-        [
+    lines.append(_boundary_summary(validation))
+    lines.append(_profile_suitability_summary(validation))
+    lines.append(_lifecycle_summary(validation.lifecycle_results))
+    lines.extend([
+        "## Governance Policy",
+        "",
+        "- Normal: continue scheduled DCA and rebalancing without allocation changes.",
+        "- Review-required: perform documented review; do not change target allocation automatically.",
+        "- Thesis-broken: freeze optimization-based changes until full re-validation.",
+        "- Product replacement may occur within the same quadrant without changing target weights.",
+        "- Allocation redesign requires a new validation run and a new strategy lock document.",
+        "- Short-term benchmark underperformance alone does not justify redesign.",
+        "- Suitability classifications are mechanical screens, not personalized financial advice.",
+        "",
         "## Stress Test Summary",
         "",
         "| ID | Scenario | Portfolio Return | Passed |",
         "|----|----------|------------------|--------|",
-        ]
-    )
+    ])
     for sr in validation.stress_results:
-        lines.append(
-            f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | "
-            f"{'✓' if sr.passed else '✗'} |"
-        )
+        lines.append(f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | {'✓' if sr.passed else '✗'} |")
     lines.extend(["", format_pool_markdown(), "## Disclaimer", "", DISCLAIMER, ""])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines), encoding="utf-8")

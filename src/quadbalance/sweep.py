@@ -10,13 +10,13 @@ import pandas as pd
 from quadbalance.benchmarks import run_benchmarks
 from quadbalance.config import StrategyConfig, generate_sweep_configs
 from quadbalance.data import load_backup_prices, load_price_matrix_with_meta
-from quadbalance.metrics import cash_risk_free_rate, compute_metrics
+from quadbalance.metrics import cash_risk_free_rate, classify_suitability, compute_metrics
 from quadbalance.proxy_sensitivity import (
     SensitivitySummary,
     run_sensitivity,
     write_sensitivity_outputs,
 )
-from quadbalance.simulator import simulate
+from quadbalance.simulator import LifecycleResult, simulate, simulate_lifecycle
 from quadbalance.stress import S4PathResult, run_stress_tests
 from quadbalance.validation import (
     ValidationResult,
@@ -39,6 +39,10 @@ class SweepRow:
     positive_years_pct: float
     rebalance_premium: float
     worst_year_return: float
+    real_annualized_return: float
+    real_terminal_wealth: float
+    worst_rolling_3y_real_return: float
+    longest_underwater_days: int
     validation_passed: bool
     failure_reasons: str
     qdii_fill_rate: float
@@ -49,6 +53,10 @@ class SweepRow:
     rebalance_shortfall_events: int
     total_rebalance_shortfall_cny: float
     max_post_rebalance_deviation: float
+    accumulation_suitability: str
+    balanced_core_suitability: str
+    pre_retirement_preservation_suitability: str
+    retirement_withdrawal_suitability: str
 
 
 def run_sweep(
@@ -67,16 +75,21 @@ def run_sweep(
     first_pass_config: StrategyConfig | None = None
     first_pass_result = None
     first_s4_path: S4PathResult | None = None
+    lifecycle_results: list[LifecycleResult] = []
     sensitivity_frames: list[pd.DataFrame] = []
 
     for config in generate_sweep_configs():
         result = simulate(prices, config, backup_prices=backup_prices)
         no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
-        metrics = compute_metrics(result, config, prices, rf, no_rebal)
+        metrics = compute_metrics(result, config, prices, rf, no_rebal, inflation_annual=0.03)
         stress, s4_path = run_stress_tests(config, result, prices, backup_prices)
         validation = evaluate_acceptance(config, metrics, benchmarks, stress)
         qm = result.qdii_metrics
         rm = result.rebalance_metrics
+        qdii_fill = qm.qdii_fill_rate if qm else 1.0
+        qdii_gap = qm.avg_qdii_weight_gap if qm else 0.0
+        suitability = classify_suitability(config, metrics, qdii_fill, qdii_gap)
+        validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
 
         rows.append(
             SweepRow(
@@ -92,6 +105,10 @@ def run_sweep(
                 positive_years_pct=metrics.positive_years_pct,
                 rebalance_premium=metrics.rebalance_premium,
                 worst_year_return=metrics.worst_year_return,
+                real_annualized_return=metrics.real_annualized_return,
+                real_terminal_wealth=metrics.real_terminal_wealth,
+                worst_rolling_3y_real_return=metrics.worst_rolling_3y_real_return,
+                longest_underwater_days=metrics.longest_underwater_days,
                 validation_passed=validation.passed,
                 failure_reasons="; ".join(validation.failure_reasons),
                 qdii_fill_rate=qm.qdii_fill_rate if qm else 1.0,
@@ -102,6 +119,10 @@ def run_sweep(
                 rebalance_shortfall_events=rm.shortfall_event_count if rm else 0,
                 total_rebalance_shortfall_cny=rm.total_shortfall_cny if rm else 0.0,
                 max_post_rebalance_deviation=rm.max_post_rebalance_deviation if rm else 0.0,
+                accumulation_suitability=suitability["accumulation"].classification,
+                balanced_core_suitability=suitability["balanced_core"].classification,
+                pre_retirement_preservation_suitability=suitability["pre_retirement_preservation"].classification,
+                retirement_withdrawal_suitability=suitability["retirement_withdrawal"].classification,
             )
         )
 
@@ -141,6 +162,19 @@ def run_sweep(
                 sensitivity_summary, segments, sens_df, output_dir, first_pass_config.config_id
             )
 
+        if first_pass_config is not None:
+            lifecycle_results = [
+                simulate_lifecycle(prices, first_pass_config, "no_dca", interrupt_months=999),
+                simulate_lifecycle(prices, first_pass_config, "dca_interrupt_12m", interrupt_months=12),
+                simulate_lifecycle(prices, first_pass_config, "dca_interrupt_24m", interrupt_months=24),
+                simulate_lifecycle(prices, first_pass_config, "dca_interrupt_36m", interrupt_months=36),
+                simulate_lifecycle(prices, first_pass_config, "withdrawal_3pct", withdrawal_rate=0.03, withdrawal_mode="annual"),
+                simulate_lifecycle(prices, first_pass_config, "withdrawal_4pct", withdrawal_rate=0.04, withdrawal_mode="annual"),
+                simulate_lifecycle(prices, first_pass_config, "withdrawal_5pct", withdrawal_rate=0.05, withdrawal_mode="annual"),
+                simulate_lifecycle(prices, first_pass_config, "bear_market_retirement_start", withdrawal_rate=0.04, withdrawal_mode="annual"),
+            ]
+            first_pass.lifecycle_results = lifecycle_results
+            first_pass.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
         generate_lock_document(
             first_pass_config,
             first_pass_result,
