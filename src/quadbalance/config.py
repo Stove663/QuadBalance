@@ -1,101 +1,29 @@
-"""Strategy configuration and parameter sweep definitions."""
+"""Strategy configuration definitions."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
-ProxySource = Literal["otc", "etf"]
+from quadbalance.asset_universe import (
+    ALL_SYMBOLS,
+    BENCHMARK_BOND,
+    BENCHMARK_CASH,
+    BENCHMARK_CSI300,
+    BOND_VARIANTS,
+    CASH_SYMBOL,
+    ENABLE_QDII_QUOTA,
+    GOLD_SYMBOL,
+    PRICE_MATRIX_SYMBOLS,
+    QDII_BACKUP_SYMBOLS,
+    QDII_SYMBOL,
+    STOCK_SUB_WEIGHTS,
+    Quadrant,
+)
+from quadbalance.instrument_pool import default_qdii_daily_caps
 
-Quadrant = Literal["stocks", "bonds", "gold", "cash"]
 DcaMethod = Literal["proportional", "underweight"]
 BondVariant = Literal["B1", "B2", "B3"]
-AssetChannel = Literal["otc", "exchange"]
-
-# Off-exchange (场外) open-end funds — locked strategy asset universe
-ASSET_CHANNEL: AssetChannel = "otc"
-
-PRIMARY_START = "2013-01-01"
-BASE_CAPITAL = 1_000_000.0
-MONTHLY_CONTRIBUTION = 10_000.0
-# Deprecated: use quadbalance.fees.purchase_fee_rate / redemption_fee_rate per symbol.
-TRANSACTION_COST = 0.001
-
-# Stocks: domestic CSI 300 feeder + S&P 500 QDII (direct index)
-STOCK_SUB_WEIGHTS = {"110020": 0.6, "161125": 0.4}
-QDII_SYMBOL = "161125"
-ENABLE_QDII_QUOTA = True
-DEFAULT_QDII_DAILY_CAP = 100.0
-
-GOLD_SYMBOL = "000216"
-CASH_SYMBOL = "006874"
-
-BOND_VARIANTS: dict[BondVariant, dict[str, float]] = {
-    "B1": {"003358": 1.0},  # 嘉实3-5年国债ETF联接A
-    "B2": {"003327": 1.0},  # 易方达中债7-10年国开行债券指数A
-    "B3": {"003358": 0.5, "003327": 0.5},
-}
-
-INSTRUMENT_NAMES: dict[str, str] = {
-    "110020": "易方达沪深300ETF联接A",
-    "161125": "易方达标普500指数（QDII-LOF）A",
-    "050025": "博时标普500ETF联接(QDII)A",
-    "006075": "博时标普500ETF联接(QDII)C",
-    "003358": "嘉实3-5年国债ETF联接A",
-    "003327": "易方达中债7-10年国开行债券指数A",
-    "000216": "华安黄金ETF联接A",
-    "006874": "泰康现金管家货币A",
-    "070009": "嘉实超短债债券A",
-    "161119": "易方达中债新综合指数（LOF）A",
-    "518880": "华安黄金ETF",
-}
-
-
-@dataclass(frozen=True)
-class BacktestProxy:
-    """Longer-history instrument used before primary fund inception."""
-
-    code: str
-    source: ProxySource
-    note: str
-
-
-# Primary OTC symbol -> backtest proxy (see instrument_pool backup notes)
-BACKTEST_PROXIES: dict[str, BacktestProxy] = {
-    "006874": BacktestProxy("070009", "otc", "Cash proxy before 006874 inception"),
-    "161125": BacktestProxy("050025", "otc", "QDII proxy before 161125 inception"),
-    "003358": BacktestProxy("161119", "otc", "B1 bond proxy before 003358 inception"),
-    "003327": BacktestProxy("161119", "otc", "B2 bond proxy before 003327 inception"),
-    "000216": BacktestProxy("518880", "etf", "Gold proxy before 000216 inception"),
-}
-
-ALLOCATION_VARIANTS: dict[str, tuple[float, float, float, float]] = {
-    "25-25-25-25": (0.25, 0.25, 0.25, 0.25),
-    "20-30-25-25": (0.20, 0.30, 0.25, 0.25),
-    "30-20-25-25": (0.30, 0.20, 0.25, 0.25),
-    "20-25-30-25": (0.20, 0.25, 0.30, 0.25),
-    "35-20-20-25": (0.35, 0.20, 0.20, 0.25),
-    "40-20-20-20": (0.40, 0.20, 0.20, 0.20),
-    "45-20-20-15": (0.45, 0.20, 0.20, 0.15),
-    "50-20-15-15": (0.50, 0.20, 0.15, 0.15),
-    "30-25-20-25": (0.30, 0.25, 0.20, 0.25),
-    "20-30-20-30": (0.20, 0.30, 0.20, 0.30),
-    "15-35-15-35": (0.15, 0.35, 0.15, 0.35),
-}
-
-QDII_BACKUP_SYMBOLS = ("050025", "006075")
-
-# Alignment set: primaries + bond sweep columns only (no QDII backups).
-PRICE_MATRIX_SYMBOLS = sorted(
-    set(STOCK_SUB_WEIGHTS) | {GOLD_SYMBOL, CASH_SYMBOL} | set(BOND_VARIANTS["B3"])
-)
-
-ALL_SYMBOLS = PRICE_MATRIX_SYMBOLS
-
-# Benchmark instruments (场外 feeders aligned with strategy)
-BENCHMARK_CSI300 = "110020"
-BENCHMARK_BOND = "003358"
-BENCHMARK_CASH = CASH_SYMBOL
 
 
 @dataclass(frozen=True)
@@ -110,12 +38,10 @@ class StrategyConfig:
     rebalance_threshold: float
     qdii_premium: float = 0.0
     enable_qdii_quota: bool = ENABLE_QDII_QUOTA
-    qdii_daily_caps: dict[str, float] = field(default_factory=dict)
+    qdii_daily_caps: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
-        if not self.qdii_daily_caps:
-            from quadbalance.instrument_pool import default_qdii_daily_caps
-
+        if self.qdii_daily_caps is None:
             object.__setattr__(self, "qdii_daily_caps", default_qdii_daily_caps())
 
     @property
@@ -134,7 +60,6 @@ class StrategyConfig:
         }
 
     def instrument_weights(self) -> dict[str, float]:
-        """Portfolio-level target weight per instrument."""
         weights: dict[str, float] = {}
         for sym, sub in STOCK_SUB_WEIGHTS.items():
             weights[sym] = self.stocks * sub
@@ -184,21 +109,11 @@ class StrategyConfig:
 
 
 def generate_sweep_configs() -> list[StrategyConfig]:
-    configs: list[StrategyConfig] = []
-    for alloc_name, (s, b, g, c) in ALLOCATION_VARIANTS.items():
-        for bond in ("B1", "B2", "B3"):
-            for dca in ("proportional", "underweight"):
-                for threshold in (0.05, 0.10):
-                    configs.append(
-                        StrategyConfig(
-                            allocation_name=alloc_name,
-                            stocks=s,
-                            bonds=b,
-                            gold=g,
-                            cash=c,
-                            bond_variant=bond,  # type: ignore[arg-type]
-                            dca_method=dca,  # type: ignore[arg-type]
-                            rebalance_threshold=threshold,
-                        )
-                    )
-    return configs
+    from quadbalance.sweep_space import generate_sweep_configs as _generate_sweep_configs
+
+    return _generate_sweep_configs()
+
+
+# Backward-compatible exports for older imports.
+PRICE_MATRIX_SYMBOLS = PRICE_MATRIX_SYMBOLS
+QDII_BACKUP_SYMBOLS = QDII_BACKUP_SYMBOLS

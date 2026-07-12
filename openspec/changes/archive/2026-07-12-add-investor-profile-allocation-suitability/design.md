@@ -2,6 +2,12 @@
 
 ## Context
 
+The project is being scoped as a personal long-term investment workflow with three phases: a core engine for expected return, backtest, and stress testing; a GUI in a later phase; and a ledger in a later phase for recording buys, sells, and rebalancing activity.
+
+The current codebase already exposes a broad orchestrator in `sweep.py` and validation/reporting logic in `validation.py`; this change should keep those responsibilities modular rather than pushing more business rules into the orchestrator, while also separating scenario definitions, portfolio templates, and asset catalog data into their own modules.
+
+The MVP assumptions are now fixed for implementation planning: daily backtest frequency, fixed-amount DCA, threshold-based rebalancing that uses new cash first, rule-driven suitability classification, and a long backtest window of 15+ years when available.
+
 The current system validates portfolio configurations using historical backtests, benchmark comparisons, stress scenarios, QDII execution metrics, real-return metrics, lifecycle stress tests, behavioral boundaries, and governance rules. This is necessary but not sufficient for investment-strategy selection because a valid allocation can still be unsuitable for a particular investor.
 
 The key design shift is to separate:
@@ -200,3 +206,20 @@ The document should explicitly state that profile classification is a mechanical
 - Should accumulation suitability compare against a higher-equity benchmark in addition to 60/40?
 - Should QDII unavailability cause accumulation-specific caution earlier than balanced-core caution?
 - Should stock sub-allocation variants, such as A-share/QDII 50/50 or 40/60, be part of this change or a follow-up change?
+- Should the first-phase MVP explicitly prioritize the pressure tests for recession and stagflation before GUI work begins?
+- Should report outputs be standardized as CSV plus markdown now, with JSON reserved for later GUI integration?
+- Should lifecycle simulation and suitability evaluation expose stable intermediate artifacts for future ledger ingestion?
+
+## Pre-coding Decisions to Confirm
+
+The following items should be decided before implementation begins:
+
+1. Data source and data frequency for backtests and stress tests.
+2. Supported asset classes in the first release.
+3. DCA timing rules, including skipped-period behavior and contribution priority.
+4. Rebalancing trigger rules and whether rebalancing is contribution-first or trade-first.
+5. Thresholds for `suitable`, `caution`, and `unsuitable` classifications.
+6. Backtest window and whether rolling windows are required in MVP.
+7. Strategy-lock selection rules when multiple configurations pass validation.
+8. Whether first-phase work only simulates portfolios or also prepares interfaces for future ledger ingestion.
+9. Module boundaries for data, backtest, stress testing, lifecycle simulation, suitability, reporting, and CLI.

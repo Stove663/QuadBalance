@@ -13,12 +13,8 @@ from typing import Literal
 
 import pandas as pd
 
-from quadbalance.config import (
-    BACKTEST_PROXIES,
-    DEFAULT_QDII_DAILY_CAP,
-    QDII_SYMBOL,
-    Quadrant,
-)
+from quadbalance.asset_universe import DEFAULT_QDII_DAILY_CAP, QDII_SYMBOL, Quadrant
+from quadbalance.instrument_catalog import BACKTEST_PROXIES, BacktestProxy
 
 QuotaRisk = Literal["low", "medium", "high"]
 

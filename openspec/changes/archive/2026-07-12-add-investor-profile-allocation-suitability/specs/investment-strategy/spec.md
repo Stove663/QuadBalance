@@ -2,6 +2,25 @@
 
 ## ADDED Requirements
 
+### Requirement: Project scope alignment
+
+The strategy SHALL align with the project goal of supporting a personal long-term investment workflow with three phases: a core engine for expected return, backtest, and stress testing; a GUI in a later phase; and a ledger in a later phase for recording buys, sells, and rebalancing activity.
+
+The first-phase implementation SHALL focus on data-driven backtesting, deterministic stress testing, and suitability assessment before GUI or ledger work begins.
+
+The current codebase SHALL remain modular across data loading, configuration, simulation, metrics, suitability evaluation, reporting, and scenario definitions so that later GUI and ledger work can be added without rewriting the core engine.
+
+The report outputs SHALL be standardized as CSV plus markdown in the first phase, while leaving JSON export and ledger-ingestion interfaces for later phases.
+
+The MVP implementation SHALL use daily backtest frequency, fixed-amount DCA, threshold-based rebalancing that uses new cash first, rule-driven suitability classification, and a backtest window of 15+ years when available.
+
+#### Scenario: Scope remains phased
+
+- **WHEN** the project is planned or reviewed
+- **THEN** the core engine remains the first-phase deliverable
+- **AND** GUI and ledger capabilities are treated as later phases
+- **AND** the strategy work does not require live brokerage integration or automated trading
+
 ### Requirement: Investor profile definitions
 
 The strategy SHALL define investor lifecycle profiles used to evaluate whether a mechanically valid allocation is suitable for a specific use case. Profile suitability MUST be treated as a strategy-selection constraint, not as a discretionary market-timing signal.

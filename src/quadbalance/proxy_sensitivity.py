@@ -8,7 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from quadbalance.benchmarks import BenchmarkResult
-from quadbalance.config import BACKTEST_PROXIES, StrategyConfig
+from quadbalance.instrument_catalog import BACKTEST_PROXIES
+from quadbalance.config import StrategyConfig
 from quadbalance.data import PriceMatrixMeta, build_perturbed_from_baseline
 from quadbalance.metrics import PerformanceMetrics, _max_drawdown, compute_metrics
 from quadbalance.simulator import simulate

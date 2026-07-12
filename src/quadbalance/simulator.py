@@ -6,14 +6,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from quadbalance.config import (
-    BASE_CAPITAL,
-    CASH_SYMBOL,
-    MONTHLY_CONTRIBUTION,
-    QDII_SYMBOL,
-    Quadrant,
-    StrategyConfig,
-)
+from quadbalance.asset_universe import BASE_CAPITAL, CASH_SYMBOL, MONTHLY_CONTRIBUTION, QDII_SYMBOL, Quadrant
+from quadbalance.config import StrategyConfig
 from quadbalance.fees import purchase_fee_rate, redemption_fee_rate
 from quadbalance.instrument_pool import primary_qdii_handoff_date, qdii_pool_for_date
 
@@ -25,6 +19,8 @@ class QdiiExecutionMetrics:
     max_pending_cash: float
     pending_cash_days: int
     avg_qdii_weight_gap: float
+    qdii_friction_months: int = 0
+    qdii_recovery_months: int = 0
 
 
 @dataclass(frozen=True)
@@ -82,6 +78,10 @@ class _SimContext:
     backup_events: list[str] = field(default_factory=list)
     rebalance_shortfalls: list[RebalanceShortfallEvent] = field(default_factory=list)
     post_rebalance_deviations: list[float] = field(default_factory=list)
+    qdii_friction_months: int = 0
+    qdii_recovery_months: int = 0
+    qdii_friction_streak: int = 0
+    qdii_recovery_streak: int = 0
 
 
 def _first_trading_days_per_month(index: pd.DatetimeIndex) -> set[pd.Timestamp]:
@@ -376,7 +376,20 @@ def _record_weight_gap(shares: dict[str, float], day_prices: pd.Series, config: 
     if total <= 0:
         return
     actual = _qdii_holdings_value(shares, day_prices, dt) / total
-    ctx.weight_gaps.append(actual - config.qdii_target_weight())
+    gap = actual - config.qdii_target_weight()
+    ctx.weight_gaps.append(gap)
+    if gap < -0.02:
+        ctx.qdii_friction_streak += 1
+    else:
+        if ctx.qdii_friction_streak >= 12:
+            ctx.qdii_friction_months = max(ctx.qdii_friction_months, ctx.qdii_friction_streak)
+        ctx.qdii_friction_streak = 0
+    if actual >= config.qdii_target_weight() * 0.5:
+        if ctx.qdii_recovery_streak > 0 and ctx.qdii_recovery_streak >= 24:
+            ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, ctx.qdii_recovery_streak)
+        ctx.qdii_recovery_streak = 0
+    else:
+        ctx.qdii_recovery_streak += 1
 
 
 def _build_rebalance_metrics(ctx: _SimContext) -> RebalanceExecutionMetrics:
@@ -396,6 +409,8 @@ def _build_qdii_metrics(ctx: _SimContext) -> QdiiExecutionMetrics:
         float(max(pending)) if pending else 0.0,
         sum(1 for p in pending if p > 0),
         float(sum(ctx.weight_gaps) / len(ctx.weight_gaps)) if ctx.weight_gaps else 0.0,
+        ctx.qdii_friction_months,
+        ctx.qdii_recovery_months,
     )
 
 
@@ -467,6 +482,11 @@ def simulate(
     annual_quadrant = _compute_annual_quadrant_returns(sim_prices, config)
     instrument_starts = {s: sim_prices[s].first_valid_index().strftime("%Y-%m-%d") for s in core_symbols}
 
+    if ctx.qdii_friction_streak >= 12:
+        ctx.qdii_friction_months = max(ctx.qdii_friction_months, ctx.qdii_friction_streak)
+    if ctx.qdii_recovery_streak >= 24:
+        ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, ctx.qdii_recovery_streak)
+
     return SimulationResult(
         config_id=config.config_id,
         daily_values=daily_values,
@@ -512,10 +532,20 @@ def simulate_lifecycle(
     base = simulate(prices, config)
     lifecycle = base.daily_values.copy()
     month_periods = lifecycle.index.to_period("M")
-    interrupted = set(sorted(month_periods.unique())[:interrupt_months]) if interrupt_months > 0 else set()
+    months = sorted(month_periods.unique())
+    interrupted = set(months[:interrupt_months]) if interrupt_months > 0 else set()
 
     if interrupted:
         lifecycle.loc[month_periods.isin(interrupted)] = 0.0
+
+    if scenario_id == "one_time_liquidity_20pct" and len(lifecycle) > 0:
+        drawdown_floor = lifecycle.cummax() * 0.8
+        drawdown_mask = lifecycle < lifecycle.cummax()
+        if drawdown_mask.any():
+            trigger_idx = lifecycle[drawdown_mask].index[0]
+        else:
+            trigger_idx = lifecycle.index[len(lifecycle) // 2]
+        lifecycle.loc[trigger_idx:] = lifecycle.loc[trigger_idx:] * 0.8
 
     if withdrawal_rate > 0:
         if withdrawal_mode == "annual":

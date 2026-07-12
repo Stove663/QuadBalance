@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from quadbalance.config import (
+from quadbalance.asset_universe import (
+    BASE_CAPITAL,
     BENCHMARK_BOND,
     BENCHMARK_CASH,
     BENCHMARK_CSI300,
-    BASE_CAPITAL,
     MONTHLY_CONTRIBUTION,
 )
 from quadbalance.fees import purchase_fee_rate

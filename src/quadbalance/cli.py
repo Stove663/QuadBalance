@@ -26,6 +26,12 @@ def main() -> None:
         action="store_true",
         help="Run proxy sensitivity for all passing configurations (default: locked only)",
     )
+    parser.add_argument(
+        "--intended-profile",
+        choices=["accumulation", "balanced_core", "pre_retirement_preservation", "retirement_withdrawal"],
+        default=None,
+        help="Preferred investor profile used to prioritize the locked configuration",
+    )
     args = parser.parse_args()
 
     print("Loading data and running parameter sweep...")
@@ -33,6 +39,7 @@ def main() -> None:
         output_dir=args.output,
         use_cache=not args.no_cache,
         full_sensitivity=args.full_sensitivity,
+        intended_profile=args.intended_profile,
     )
 
     passed = df["validation_passed"].sum()

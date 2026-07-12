@@ -2,14 +2,16 @@
 
 ## Why
 
+The current project direction is to support a personal long-term investment workflow with three phases: a core engine for expected return, backtest, and stress testing; a GUI in a later phase; and a ledger in a later phase for recording buys, sells, and rebalancing activity.
+
 The current strategy validation framework can determine whether a candidate permanent-portfolio configuration passes historical backtest, stress, execution-friction, and governance checks. However, the strategy still lacks an explicit answer to a higher-level investment question: **suitable for whom, and for which life stage?**
 
-A single 25/25/25/25 permanent portfolio may be appropriate for a conservative investor seeking stability, but it may be overly defensive for a long accumulation horizon and under-modeled for retirement withdrawal use. Without investor-profile suitability checks, the system may lock a mechanically valid strategy that is misaligned with the investor's time horizon, contribution stability, withdrawal needs, real-return objective, or behavioral tolerance.
+A single 25/25/25/25 permanent portfolio may be appropriate for a conservative investor seeking stability, but it may be overly defensive for a long accumulation horizon and under-modeled for retirement withdrawal use. Without investor-profile suitability checks, the system can lock a mechanically valid strategy that is misaligned with the investor's time horizon, contribution stability, withdrawal needs, real-return objective, or behavioral tolerance.
 
 This change adds profile-aware allocation suitability assessment. It expands the candidate allocation space beyond classic permanent-portfolio variants, evaluates configurations against investor lifecycle profiles, and requires strategy-lock output to state which profiles the locked strategy is suitable, cautionary, or unsuitable for.
-
 ## What Changes
 
+- Define the implementation boundaries for the current codebase so the first phase remains modular across data loading, configuration, simulation, metrics, suitability evaluation, and reporting.
 - Define investor profiles used for strategy suitability assessment:
   - accumulation
   - balanced core
@@ -20,7 +22,7 @@ This change adds profile-aware allocation suitability assessment. It expands the
 - Require suitability scoring and classification per profile: `suitable`, `caution`, or `unsuitable`.
 - Require validation output and strategy-lock documents to disclose suitability classification, reasons, and key tradeoffs.
 - Strengthen lifecycle validation so suitability conclusions are based on actual cashflow simulation rather than post-processing a baseline value curve.
-
+- Keep the MVP focused on core engine, stress testing, and suitability assessment before GUI or ledger work begins.
 ## Out of Scope
 
 - No live brokerage integration.

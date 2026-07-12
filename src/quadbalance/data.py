@@ -9,14 +9,8 @@ from pathlib import Path
 import akshare as ak
 import pandas as pd
 
-from quadbalance.config import (
-    BACKTEST_PROXIES,
-    INSTRUMENT_NAMES,
-    PRICE_MATRIX_SYMBOLS,
-    PRIMARY_START,
-    QDII_BACKUP_SYMBOLS,
-    BacktestProxy,
-)
+from quadbalance.asset_universe import PRICE_MATRIX_SYMBOLS, PRIMARY_START, QDII_BACKUP_SYMBOLS
+from quadbalance.instrument_catalog import BACKTEST_PROXIES, INSTRUMENT_NAMES, BacktestProxy
 
 CACHE_DIR = Path(".cache")
 MAX_RETRIES = 3

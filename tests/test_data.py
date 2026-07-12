@@ -72,7 +72,7 @@ def test_perturb_does_not_affect_post_handoff():
 
 
 def test_price_matrix_excludes_qdii_backups():
-    from quadbalance.config import PRICE_MATRIX_SYMBOLS, QDII_BACKUP_SYMBOLS
+    from quadbalance.asset_universe import PRICE_MATRIX_SYMBOLS, QDII_BACKUP_SYMBOLS
     from quadbalance.data import load_price_matrix_with_meta
 
     for sym in QDII_BACKUP_SYMBOLS:

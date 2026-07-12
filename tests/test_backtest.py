@@ -5,8 +5,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quadbalance.config import StrategyConfig, generate_sweep_configs
+from quadbalance.config import StrategyConfig
 from quadbalance.simulator import simulate
+from quadbalance.sweep_space import generate_sweep_configs
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def synthetic_prices() -> pd.DataFrame:
 
 def test_generate_sweep_count():
     configs = generate_sweep_configs()
-    assert len(configs) == 4 * 3 * 2 * 2  # 48 configurations
+    assert len(configs) == 11 * 3 * 2 * 2  # 132 configurations
 
 
 def test_simulate_runs(synthetic_prices: pd.DataFrame):

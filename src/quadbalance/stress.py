@@ -1,4 +1,4 @@
-"""Stress test scenarios S1-S7 and S4 five-year path simulation."""
+"""Stress test scenarios and path simulation."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pandas as pd
 from quadbalance.config import StrategyConfig
 from quadbalance.instrument_pool import qdii_pool_codes
 from quadbalance.simulator import SimulationResult, simulate
+from quadbalance.stress_scenarios import STRESS_SCENARIOS
 
 
 @dataclass
@@ -29,20 +30,6 @@ class S4PathResult:
     passed: bool
 
 
-STRESS_SCENARIOS = {
-    "S1": ("A-share crash", {"stocks": -0.40}),
-    "S2": ("Stock-bond dual kill", {"stocks": -0.20, "bonds": 0.0, "gold": 0.10, "cash": 0.02}),
-    "S3": (
-        "CNY depreciation",
-        {"stocks": 0.048, "bonds": 0.0, "gold": 0.08, "cash": 0.0},
-    ),
-    "S6": ("Gold crash", {"gold": -0.20}),
-    "S8": ("Stagflation", {"stocks": -0.20, "bonds": -0.08, "gold": 0.05, "cash": 0.02}),
-    "S9": ("Global liquidity shock", {"stocks": -0.30, "bonds": -0.05, "gold": -0.10, "cash": 0.01}),
-    "S10": ("CNY appreciation", {"stocks": 0.0, "bonds": 0.0, "gold": 0.0, "cash": 0.0}),
-    "S11": ("Domestic inflation shock", {"stocks": -0.10, "bonds": -0.08, "gold": 0.05, "cash": 0.02}),
-    "S12": ("Multi-year quadrant stagnation", {"stocks": 0.0, "bonds": 0.0, "gold": 0.0, "cash": 0.0}),
-}
 
 S4_CUMULATIVE_FLOOR = -0.10
 
@@ -144,24 +131,6 @@ def run_s4_path_test(
         window_annualized_return=window_ann,
         passed=passed,
     )
-
-
-def format_s4_path_markdown(s4: S4PathResult) -> str:
-    years_str = ", ".join(str(y) for y in s4.window_years)
-    lines = [
-        "## S4 Five-Year Path",
-        "",
-        f"Shock window: {years_str}",
-        "",
-        "| Metric | Value |",
-        "|--------|-------|",
-        f"| 5-year cumulative return | {s4.cumulative_return:.2%} |",
-        f"| Worst single year in window | {s4.worst_year_return:.2%} |",
-        f"| Window annualized return | {s4.window_annualized_return:.2%} |",
-        f"| Passed (cumulative ≥ {S4_CUMULATIVE_FLOOR:.0%}) | {'✓' if s4.passed else '✗'} |",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def run_stress_tests(

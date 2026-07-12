@@ -4,7 +4,7 @@
 
 ### Requirement: Backtest parameter sweep
 
-The backtest engine MUST run a parameter sweep across: allocation variants (25/25/25/25, 20/30/25/25, 30/20/25/25, 20/25/30/25), investor-suitability allocation variants (35/20/20/25, 40/20/20/20, 45/20/20/15, 50/20/15/15, 30/25/20/25, 20/30/20/30, 15/35/15/35), bond variants (B1 5-year, B2 10-year, B3 50/50), DCA methods (proportional, underweight-priority), and rebalancing thresholds (±5%, ±10%). Each run MUST be identified by a unique configuration ID.
+The backtest engine MUST run a parameter sweep across a broad set of allocation variants, including the classic permanent-portfolio styles (25/25/25/25, 20/30/25/25, 30/20/25/25, 20/25/30/25) and investor-suitability tilts (35/20/20/25, 40/20/20/20, 45/20/20/15, 50/20/15/15, 30/25/20/25, 20/30/20/30, 15/35/15/35), bond variants (B1 5-year, B2 10-year, B3 50/50), DCA methods (proportional, underweight-priority), and rebalancing thresholds (±5%, ±10%). Each run MUST be identified by a unique configuration ID.
 
 #### Scenario: Sweep produces comparable runs
 
@@ -67,7 +67,7 @@ Lifecycle suitability tests SHALL be simulated through the portfolio trading eng
 
 ### Requirement: Profile suitability classification
 
-The validation suite SHALL classify each candidate configuration for every default investor profile as `suitable`, `caution`, or `unsuitable`. The classification MUST be rule-based, deterministic, and accompanied by human-readable reasons.
+The validation suite SHALL classify each candidate configuration for every default investor profile as `suitable`, `caution`, or `unsuitable`. The classification MUST be rule-based, deterministic, and accompanied by human-readable reasons. Suitability evaluation MUST use return, drawdown, real-return, lifecycle cashflow, behavioral, and execution-friction inputs.
 
 #### Scenario: Accumulation suitability evaluated
 
