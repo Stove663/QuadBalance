@@ -12,13 +12,16 @@ from quadbalance.asset_universe import (
     BENCHMARK_CSI300,
     BOND_VARIANTS,
     CASH_SYMBOL,
+    DEFAULT_STOCK_SUB_SPLIT,
     ENABLE_QDII_QUOTA,
     GOLD_SYMBOL,
     PRICE_MATRIX_SYMBOLS,
     QDII_BACKUP_SYMBOLS,
     QDII_SYMBOL,
     STOCK_SUB_WEIGHTS,
+    StockSubSplit,
     Quadrant,
+    stock_sub_weights,
 )
 from quadbalance.instrument_pool import default_qdii_daily_caps
 
@@ -36,6 +39,7 @@ class StrategyConfig:
     bond_variant: BondVariant
     dca_method: DcaMethod
     rebalance_threshold: float
+    stock_sub_split: StockSubSplit = DEFAULT_STOCK_SUB_SPLIT
     qdii_premium: float = 0.0
     enable_qdii_quota: bool = ENABLE_QDII_QUOTA
     qdii_daily_caps: dict[str, float] | None = None
@@ -48,7 +52,11 @@ class StrategyConfig:
     def config_id(self) -> str:
         dca = "prop" if self.dca_method == "proportional" else "uw"
         pct = int(self.rebalance_threshold * 100)
-        return f"{self.allocation_name}_{self.bond_variant}_{dca}_{pct}pct"
+        return f"{self.allocation_name}_{self.bond_variant}_{dca}_{pct}pct_s{self.stock_sub_split}"
+
+    @property
+    def stock_weights(self) -> dict[str, float]:
+        return stock_sub_weights(self.stock_sub_split)
 
     @property
     def quadrant_weights(self) -> dict[Quadrant, float]:
@@ -61,7 +69,7 @@ class StrategyConfig:
 
     def instrument_weights(self) -> dict[str, float]:
         weights: dict[str, float] = {}
-        for sym, sub in STOCK_SUB_WEIGHTS.items():
+        for sym, sub in self.stock_weights.items():
             weights[sym] = self.stocks * sub
         for sym, sub in BOND_VARIANTS[self.bond_variant].items():
             weights[sym] = weights.get(sym, 0.0) + self.bonds * sub
@@ -70,7 +78,7 @@ class StrategyConfig:
         return weights
 
     def symbols(self) -> list[str]:
-        syms = list(STOCK_SUB_WEIGHTS.keys())
+        syms = list(self.stock_weights.keys())
         syms.extend(BOND_VARIANTS[self.bond_variant].keys())
         syms.extend([GOLD_SYMBOL, CASH_SYMBOL])
         return sorted(set(syms))
@@ -89,10 +97,10 @@ class StrategyConfig:
         return symbol in qdii_pool_codes()
 
     def qdii_target_weight(self) -> float:
-        return self.stocks * STOCK_SUB_WEIGHTS[QDII_SYMBOL]
+        return self.stocks * self.stock_weights[QDII_SYMBOL]
 
     def quadrant_for_symbol(self, symbol: str) -> Quadrant:
-        if symbol in STOCK_SUB_WEIGHTS or self.is_qdii_symbol(symbol):
+        if symbol in self.stock_weights or self.is_qdii_symbol(symbol):
             return "stocks"
         if symbol in BOND_VARIANTS[self.bond_variant]:
             return "bonds"
@@ -101,8 +109,8 @@ class StrategyConfig:
         return "cash"
 
     def sub_weight(self, symbol: str) -> float:
-        if symbol in STOCK_SUB_WEIGHTS:
-            return STOCK_SUB_WEIGHTS[symbol]
+        if symbol in self.stock_weights:
+            return self.stock_weights[symbol]
         if symbol in BOND_VARIANTS[self.bond_variant]:
             return BOND_VARIANTS[self.bond_variant][symbol]
         return 1.0
@@ -117,3 +125,4 @@ def generate_sweep_configs() -> list[StrategyConfig]:
 # Backward-compatible exports for older imports.
 PRICE_MATRIX_SYMBOLS = PRICE_MATRIX_SYMBOLS
 QDII_BACKUP_SYMBOLS = QDII_BACKUP_SYMBOLS
+STOCK_SUB_WEIGHTS = STOCK_SUB_WEIGHTS

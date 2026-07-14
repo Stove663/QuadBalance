@@ -10,6 +10,7 @@ from quadbalance.instrument_catalog import BACKTEST_PROXIES, qdii_pool_codes
 from quadbalance.portfolio_templates import ALLOCATION_VARIANTS
 from quadbalance.reporting_sections import format_s4_path_markdown
 from quadbalance.sweep_constants import DEFAULT_INFLATION_ANN, STRATEGY_LOCK_FILENAME, SWEEP_RESULTS_FILENAME
+from quadbalance.asset_universe import SWEEP_STOCK_SUB_SPLITS
 from quadbalance.sweep_space import generate_sweep_configs, SWEEP_BOND_VARIANTS, SWEEP_DCA_METHODS, SWEEP_REBALANCE_THRESHOLDS
 from quadbalance.stress import S4PathResult
 
@@ -39,7 +40,15 @@ def test_sweep_space_generates_expected_cartesian_product():
     assert len(SWEEP_BOND_VARIANTS) == 3
     assert len(SWEEP_DCA_METHODS) == 2
     assert len(SWEEP_REBALANCE_THRESHOLDS) == 2
-    assert len(configs) == len(ALLOCATION_VARIANTS) * len(SWEEP_BOND_VARIANTS) * len(SWEEP_DCA_METHODS) * len(SWEEP_REBALANCE_THRESHOLDS)
+    assert len(SWEEP_STOCK_SUB_SPLITS) == 3
+    assert len(configs) == (
+        len(ALLOCATION_VARIANTS)
+        * len(SWEEP_BOND_VARIANTS)
+        * len(SWEEP_DCA_METHODS)
+        * len(SWEEP_REBALANCE_THRESHOLDS)
+        * len(SWEEP_STOCK_SUB_SPLITS)
+    )
+    assert {c.stock_sub_split for c in configs} == set(SWEEP_STOCK_SUB_SPLITS)
 
 
 def test_sweep_constants_are_stable():

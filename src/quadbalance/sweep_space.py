@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from quadbalance.asset_universe import SWEEP_STOCK_SUB_SPLITS
 from quadbalance.portfolio_templates import ALLOCATION_VARIANTS
 
 if TYPE_CHECKING:
@@ -25,16 +26,18 @@ def generate_sweep_configs() -> list["StrategyConfig"]:
         for bond in SWEEP_BOND_VARIANTS:
             for dca in SWEEP_DCA_METHODS:
                 for threshold in SWEEP_REBALANCE_THRESHOLDS:
-                    configs.append(
-                        StrategyConfig(
-                            allocation_name=alloc_name,
-                            stocks=s,
-                            bonds=b,
-                            gold=g,
-                            cash=c,
-                            bond_variant=bond,
-                            dca_method=dca,
-                            rebalance_threshold=threshold,
+                    for stock_sub_split in SWEEP_STOCK_SUB_SPLITS:
+                        configs.append(
+                            StrategyConfig(
+                                allocation_name=alloc_name,
+                                stocks=s,
+                                bonds=b,
+                                gold=g,
+                                cash=c,
+                                bond_variant=bond,
+                                dca_method=dca,
+                                rebalance_threshold=threshold,
+                                stock_sub_split=stock_sub_split,
+                            )
                         )
-                    )
     return configs

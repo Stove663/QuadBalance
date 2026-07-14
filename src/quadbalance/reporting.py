@@ -5,17 +5,20 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from quadbalance.asset_universe import CASH_SYMBOL, GOLD_SYMBOL, QDII_SYMBOL, STOCK_SUB_WEIGHTS
+from quadbalance.asset_universe import CASH_SYMBOL, DOMESTIC_STOCK_SYMBOL, GOLD_SYMBOL, QDII_SYMBOL
 from quadbalance.instrument_catalog import INSTRUMENT_NAMES
 from quadbalance.config import StrategyConfig
 from quadbalance.data import PriceMatrixMeta, format_proxy_usage_markdown
 from quadbalance.fees import format_fee_assumptions_markdown
 from quadbalance.instrument_pool import format_pool_markdown, format_qdii_era_markdown
+from quadbalance.profile_thresholds import InvestorProfile, DEFAULT_INVESTOR_PROFILES, overridden_fields
 from quadbalance.proxy_sensitivity import SensitivitySummary, format_sensitivity_summary_markdown
 from quadbalance.reporting_sections import (
     format_boundary_summary,
     format_lifecycle_summary,
+    format_lock_selection_notes,
     format_profile_suitability_summary,
+    format_profile_thresholds_summary,
     format_rebalance_execution_markdown,
     format_stress_summary_markdown,
 )
@@ -38,9 +41,11 @@ def generate_lock_document(
     price_meta: PriceMatrixMeta | None = None,
     sensitivity_summary: SensitivitySummary | None = None,
     s4_path: S4PathResult | None = None,
+    investor_profiles: tuple[InvestorProfile, ...] = DEFAULT_INVESTOR_PROFILES,
+    intended_profile: str | None = None,
 ) -> None:
     m = validation.metrics
-    domestic_sym = next(s for s in STOCK_SUB_WEIGHTS if s != QDII_SYMBOL)
+    stock_weights = config.stock_weights
     lines = [
         "# Strategy Lock Document",
         "",
@@ -61,7 +66,10 @@ def generate_lock_document(
         "",
         "## Primary Instruments (场外)",
         "",
-        f"- Stocks: {STOCK_SUB_WEIGHTS[domestic_sym]:.0%} {domestic_sym} {INSTRUMENT_NAMES[domestic_sym]}, {STOCK_SUB_WEIGHTS[QDII_SYMBOL]:.0%} {QDII_SYMBOL} {INSTRUMENT_NAMES[QDII_SYMBOL]}",
+        f"- Stocks sub-split: {config.stock_sub_split} "
+        f"({stock_weights[DOMESTIC_STOCK_SYMBOL]:.0%} domestic / {stock_weights[QDII_SYMBOL]:.0%} QDII)",
+        f"- Stocks: {stock_weights[DOMESTIC_STOCK_SYMBOL]:.0%} {DOMESTIC_STOCK_SYMBOL} {INSTRUMENT_NAMES[DOMESTIC_STOCK_SYMBOL]}, "
+        f"{stock_weights[QDII_SYMBOL]:.0%} {QDII_SYMBOL} {INSTRUMENT_NAMES[QDII_SYMBOL]}",
         f"- Bonds: {config.bond_variant} variant",
         f"- Gold: {GOLD_SYMBOL} {INSTRUMENT_NAMES[GOLD_SYMBOL]}",
         f"- Cash: {CASH_SYMBOL} {INSTRUMENT_NAMES[CASH_SYMBOL]}",
@@ -110,7 +118,9 @@ def generate_lock_document(
     if s4_path is not None:
         lines.append(format_s4_path_markdown(s4_path))
     lines.append(format_boundary_summary(validation))
+    lines.append(format_lock_selection_notes(intended_profile))
     lines.append(format_profile_suitability_summary(validation))
+    lines.append(format_profile_thresholds_summary(investor_profiles, overridden_fields(investor_profiles)))
     lines.append(format_lifecycle_summary(validation.lifecycle_results))
     lines.extend([
         "## Governance Policy",

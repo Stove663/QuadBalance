@@ -17,8 +17,22 @@ MONTHLY_CONTRIBUTION = 10_000.0
 TRANSACTION_COST = 0.001
 
 # Stocks: domestic CSI 300 feeder + S&P 500 QDII (direct index)
-STOCK_SUB_WEIGHTS = {"110020": 0.6, "161125": 0.4}
+DOMESTIC_STOCK_SYMBOL = "110020"
 QDII_SYMBOL = "161125"
+StockSubSplit = Literal["60-40", "50-50", "40-60"]
+STOCK_SUB_SPLIT_WEIGHTS: dict[StockSubSplit, dict[str, float]] = {
+    "60-40": {DOMESTIC_STOCK_SYMBOL: 0.6, QDII_SYMBOL: 0.4},
+    "50-50": {DOMESTIC_STOCK_SYMBOL: 0.5, QDII_SYMBOL: 0.5},
+    "40-60": {DOMESTIC_STOCK_SYMBOL: 0.4, QDII_SYMBOL: 0.6},
+}
+DEFAULT_STOCK_SUB_SPLIT: StockSubSplit = "60-40"
+# Backward-compatible default mapping (60/40).
+STOCK_SUB_WEIGHTS = STOCK_SUB_SPLIT_WEIGHTS[DEFAULT_STOCK_SUB_SPLIT]
+SWEEP_STOCK_SUB_SPLITS: tuple[StockSubSplit, ...] = ("60-40", "50-50", "40-60")
+
+
+def stock_sub_weights(split: StockSubSplit = DEFAULT_STOCK_SUB_SPLIT) -> dict[str, float]:
+    return dict(STOCK_SUB_SPLIT_WEIGHTS[split])
 ENABLE_QDII_QUOTA = True
 DEFAULT_QDII_DAILY_CAP = 100.0
 

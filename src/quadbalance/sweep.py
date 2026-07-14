@@ -7,14 +7,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from quadbalance.artifacts import write_run_artifacts
 from quadbalance.benchmarks import run_benchmarks
 from quadbalance.config import StrategyConfig
-from quadbalance.sweep_space import generate_sweep_configs
 from quadbalance.data import load_backup_prices, load_price_matrix_with_meta
-from quadbalance.metrics import DEFAULT_INVESTOR_PROFILES, cash_risk_free_rate, classify_suitability, compute_metrics
+from quadbalance.metrics import cash_risk_free_rate, classify_suitability, compute_metrics
+from quadbalance.profile_thresholds import InvestorProfile, load_profile_thresholds
 from quadbalance.proxy_sensitivity import run_sensitivity, write_sensitivity_outputs
 from quadbalance.reporting import generate_lock_document
-from quadbalance.simulator import LifecycleResult, simulate, simulate_lifecycle
+from quadbalance.simulator import LifecycleResult, SimulationResult, simulate, simulate_lifecycle
 from quadbalance.stress import S4PathResult, run_stress_tests
 from quadbalance.sweep_constants import (
     DEFAULT_INFLATION_ANN,
@@ -22,7 +23,10 @@ from quadbalance.sweep_constants import (
     STRATEGY_LOCK_FILENAME,
     SWEEP_RESULTS_FILENAME,
 )
+from quadbalance.sweep_space import generate_sweep_configs
 from quadbalance.validation import ValidationResult, evaluate_acceptance
+
+PassBundle = tuple[ValidationResult, StrategyConfig, SimulationResult]
 
 
 @dataclass
@@ -32,6 +36,7 @@ class SweepRow:
     bond_variant: str
     dca_method: str
     rebalance_threshold: float
+    stock_sub_split: str
     annualized_return: float
     annualized_volatility: float
     max_drawdown: float
@@ -64,23 +69,55 @@ def _profile_rank(classification: str) -> int:
     return order.get(classification, 0)
 
 
-def _select_first_pass(
-    current: tuple[ValidationResult, StrategyConfig, pd.DataFrame],
-    candidate: tuple[ValidationResult, StrategyConfig, pd.DataFrame],
+def _qdii_fill(bundle: PassBundle) -> float:
+    qm = bundle[2].qdii_metrics
+    return qm.qdii_fill_rate if qm else 1.0
+
+
+def _lock_sort_key(
+    bundle: PassBundle,
     intended_profile: str | None,
-) -> tuple[ValidationResult, StrategyConfig, pd.DataFrame]:
-    if intended_profile is None:
-        return current
-    curr_validation, _, _ = current
-    cand_validation, _, _ = candidate
-    curr_score = _profile_rank(curr_validation.profile_suitability.get(intended_profile, {}).get("classification", "unsuitable"))
-    cand_score = _profile_rank(cand_validation.profile_suitability.get(intended_profile, {}).get("classification", "unsuitable"))
-    return candidate if cand_score > curr_score else current
+) -> tuple:
+    validation, config, _ = bundle
+    metrics = validation.metrics
+    suitability_rank = 0
+    if intended_profile is not None:
+        suitability_rank = _profile_rank(
+            validation.profile_suitability.get(intended_profile, {}).get("classification", "unsuitable")
+        )
+    return (
+        suitability_rank if intended_profile is not None else 0,
+        metrics.annualized_return,
+        -abs(metrics.max_drawdown),
+        _qdii_fill(bundle),
+        # invert config_id for ascending via negated tuple trick: use separate compare
+        config.config_id,
+    )
 
 
-def _attach_profile_defaults(validation: ValidationResult) -> None:
-    for profile in DEFAULT_INVESTOR_PROFILES:
-        validation.profile_suitability.setdefault(profile.profile_id, {"classification": "caution", "reasons": []})
+def prefer_lock_candidate(
+    current: PassBundle,
+    candidate: PassBundle,
+    intended_profile: str | None,
+) -> PassBundle:
+    """Deterministic multi-key lock selection. Higher key wins except config_id ascending."""
+    curr_key = _lock_sort_key(current, intended_profile)
+    cand_key = _lock_sort_key(candidate, intended_profile)
+    # Compare numeric prefixes; for final config_id, smaller wins.
+    for i in range(4):
+        if cand_key[i] != curr_key[i]:
+            return candidate if cand_key[i] > curr_key[i] else current
+    return candidate if cand_key[4] < curr_key[4] else current
+
+
+def _attach_profile_defaults(
+    validation: ValidationResult,
+    investor_profiles: tuple[InvestorProfile, ...],
+) -> None:
+    for profile in investor_profiles:
+        validation.profile_suitability.setdefault(
+            profile.profile_id, {"classification": "caution", "reasons": []}
+        )
 
 
 def _build_lifecycle_results(prices: pd.DataFrame, config: StrategyConfig) -> list[LifecycleResult]:
@@ -110,6 +147,7 @@ def _populate_row(
         bond_variant=config.bond_variant,
         dca_method=config.dca_method,
         rebalance_threshold=config.rebalance_threshold,
+        stock_sub_split=config.stock_sub_split,
         annualized_return=metrics.annualized_return,
         annualized_volatility=metrics.annualized_volatility,
         max_drawdown=metrics.max_drawdown,
@@ -133,8 +171,12 @@ def _populate_row(
         max_post_rebalance_deviation=rm.max_post_rebalance_deviation if rm else 0.0,
         accumulation_suitability=validation.profile_suitability["accumulation"]["classification"],
         balanced_core_suitability=validation.profile_suitability["balanced_core"]["classification"],
-        pre_retirement_preservation_suitability=validation.profile_suitability["pre_retirement_preservation"]["classification"],
-        retirement_withdrawal_suitability=validation.profile_suitability["retirement_withdrawal"]["classification"],
+        pre_retirement_preservation_suitability=validation.profile_suitability[
+            "pre_retirement_preservation"
+        ]["classification"],
+        retirement_withdrawal_suitability=validation.profile_suitability["retirement_withdrawal"][
+            "classification"
+        ],
     )
 
 
@@ -143,15 +185,18 @@ def run_sweep(
     use_cache: bool = True,
     full_sensitivity: bool = False,
     intended_profile: str | None = None,
+    profile_thresholds_path: Path | None = None,
+    investor_profiles: tuple[InvestorProfile, ...] | None = None,
 ) -> tuple[pd.DataFrame, ValidationResult | None, StrategyConfig | None]:
     """Run full parameter sweep and return results."""
+    profiles = investor_profiles if investor_profiles is not None else load_profile_thresholds(profile_thresholds_path)
     prices, price_meta = load_price_matrix_with_meta(use_cache=use_cache)
     backup_prices = load_backup_prices(use_cache=use_cache)
     benchmarks = run_benchmarks(prices)
     rf = cash_risk_free_rate(prices)
 
     rows: list[SweepRow] = []
-    first_pass_bundle: tuple[ValidationResult, StrategyConfig, pd.DataFrame] | None = None
+    first_pass_bundle: PassBundle | None = None
     first_s4_path: S4PathResult | None = None
     sensitivity_frames: list[pd.DataFrame] = []
 
@@ -167,19 +212,32 @@ def run_sweep(
         qdii_gap = qm.avg_qdii_weight_gap if qm else 0.0
         qdii_friction_months = qm.qdii_friction_months if qm else 0
         qdii_recovery_months = qm.qdii_recovery_months if qm else 0
-        suitability = classify_suitability(config, metrics, qdii_fill, qdii_gap, qdii_friction_months, qdii_recovery_months)
-        validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
-        _attach_profile_defaults(validation)
+        suitability = classify_suitability(
+            config,
+            metrics,
+            qdii_fill,
+            qdii_gap,
+            qdii_friction_months,
+            qdii_recovery_months,
+            investor_profiles=profiles,
+        )
+        validation.profile_suitability = {
+            k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()
+        }
+        _attach_profile_defaults(validation, profiles)
 
         rows.append(_populate_row(config, metrics, validation, qm, rm))
 
         if validation.passed:
-            candidate_bundle = (validation, config, result)
+            candidate_bundle: PassBundle = (validation, config, result)
             if first_pass_bundle is None:
                 first_pass_bundle = candidate_bundle
                 first_s4_path = s4_path
             else:
-                first_pass_bundle = _select_first_pass(first_pass_bundle, candidate_bundle, intended_profile)
+                preferred = prefer_lock_candidate(first_pass_bundle, candidate_bundle, intended_profile)
+                if preferred is candidate_bundle:
+                    first_pass_bundle = candidate_bundle
+                    first_s4_path = s4_path
 
         if full_sensitivity and validation.passed:
             _, _, sens_df = run_sensitivity(
@@ -221,6 +279,16 @@ def run_sweep(
             price_meta=price_meta,
             sensitivity_summary=sensitivity_summary,
             s4_path=first_s4_path,
+            investor_profiles=profiles,
+            intended_profile=intended_profile,
+        )
+        write_run_artifacts(
+            output_dir,
+            first_pass_config,
+            first_pass_result,
+            first_pass,
+            profiles,
+            lifecycle_results=first_pass.lifecycle_results,
         )
 
     return df, first_pass_bundle[0] if first_pass_bundle else None, first_pass_bundle[1] if first_pass_bundle else None

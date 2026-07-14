@@ -211,11 +211,12 @@ def classify_suitability(
     avg_qdii_weight_gap: float,
     qdii_friction_months: int = 0,
     qdii_recovery_months: int = 0,
+    investor_profiles: tuple[InvestorProfile, ...] = DEFAULT_INVESTOR_PROFILES,
 ) -> dict[str, ProfileSuitability]:
     profiles: dict[str, ProfileSuitability] = {}
     qdii_reasons = _qdii_reasons(qdii_fill_rate, avg_qdii_weight_gap, qdii_friction_months, qdii_recovery_months)
 
-    for profile in DEFAULT_INVESTOR_PROFILES:
+    for profile in investor_profiles:
         if profile.profile_id == "accumulation":
             profiles[profile.profile_id] = _classify_accumulation(metrics, qdii_reasons, profile)
         elif profile.profile_id == "balanced_core":

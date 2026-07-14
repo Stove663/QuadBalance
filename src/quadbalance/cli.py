@@ -32,6 +32,12 @@ def main() -> None:
         default=None,
         help="Preferred investor profile used to prioritize the locked configuration",
     )
+    parser.add_argument(
+        "--profile-thresholds",
+        type=Path,
+        default=None,
+        help="JSON file with per-profile threshold overrides merged onto built-in defaults",
+    )
     args = parser.parse_args()
 
     print("Loading data and running parameter sweep...")
@@ -40,6 +46,7 @@ def main() -> None:
         use_cache=not args.no_cache,
         full_sensitivity=args.full_sensitivity,
         intended_profile=args.intended_profile,
+        profile_thresholds_path=args.profile_thresholds,
     )
 
     passed = df["validation_passed"].sum()
@@ -50,6 +57,7 @@ def main() -> None:
     if validation and config:
         print(f"Strategy lock document: {args.output / 'strategy-lock.md'}")
         print(f"Locked configuration: {config.config_id}")
+        print(f"Run artifacts: {args.output / 'artifacts'}")
         print(f"Proxy sensitivity: {args.output / 'proxy_sensitivity.csv'}")
         print(f"Segment metrics: {args.output / 'segment_metrics.csv'}")
     else:

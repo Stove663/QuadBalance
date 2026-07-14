@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+from quadbalance.profile_thresholds import InvestorProfile
 from quadbalance.simulator import LifecycleResult, SimulationResult
 from quadbalance.stress import S4PathResult, StressResult
 from quadbalance.validation import ValidationResult
+
+
+LOCK_SELECTION_KEYS = [
+    "suitability rank for intended profile (suitable > caution > unsuitable) when supplied",
+    "higher annualized return",
+    "lower absolute maximum drawdown",
+    "higher QDII fill rate",
+    "lexicographic configuration ID ascending",
+]
 
 
 def format_rebalance_execution_markdown(sim_result: SimulationResult) -> str:
@@ -53,6 +63,42 @@ def format_profile_suitability_summary(validation: ValidationResult) -> str:
     for profile, payload in validation.profile_suitability.items():
         reasons = "; ".join(payload.get("reasons", [])) or "—"
         lines.append(f"| {profile} | {payload.get('classification', 'caution')} | {reasons} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_lock_selection_notes(intended_profile: str | None) -> str:
+    lines = [
+        "## Lock Selection Ranking",
+        "",
+        f"- Intended profile: {intended_profile or 'none (mechanical validity only)'}",
+        "- Ranking keys (in order):",
+    ]
+    for i, key in enumerate(LOCK_SELECTION_KEYS, start=1):
+        if intended_profile is None and i == 1:
+            lines.append(f"  {i}. {key} — skipped for this run")
+        else:
+            lines.append(f"  {i}. {key}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_profile_thresholds_summary(
+    investor_profiles: tuple[InvestorProfile, ...],
+    overrides: dict[str, list[str]],
+) -> str:
+    lines = [
+        "## Effective Profile Thresholds",
+        "",
+        "| Profile | min_real_return | max_drawdown | max_underwater_years | Overrides |",
+        "|---------|-----------------|--------------|----------------------|-----------|",
+    ]
+    for profile in investor_profiles:
+        changed = ", ".join(overrides.get(profile.profile_id, [])) or "—"
+        lines.append(
+            f"| {profile.profile_id} | {profile.min_real_return:.2%} | {profile.max_drawdown:.2%} | "
+            f"{profile.max_underwater_years} | {changed} |"
+        )
     lines.append("")
     return "\n".join(lines)
 

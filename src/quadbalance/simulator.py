@@ -40,6 +40,18 @@ class RebalanceExecutionMetrics:
     max_post_rebalance_deviation: float
 
 
+@dataclass(frozen=True)
+class SimulationEvent:
+    date: str
+    event_type: str
+    symbol: str | None = None
+    cash_amount: float = 0.0
+    quantity: float | None = None
+    weight: float | None = None
+    scenario_id: str | None = None
+    note: str | None = None
+
+
 @dataclass
 class SimulationResult:
     config_id: str
@@ -54,6 +66,7 @@ class SimulationResult:
     qdii_metrics: QdiiExecutionMetrics | None = None
     rebalance_shortfalls: list[RebalanceShortfallEvent] = field(default_factory=list)
     rebalance_metrics: RebalanceExecutionMetrics | None = None
+    events: list[SimulationEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -64,6 +77,7 @@ class LifecycleResult:
     max_drawdown: float
     depleted: bool
     recovery_days: int
+    events: list[SimulationEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -82,6 +96,7 @@ class _SimContext:
     qdii_recovery_months: int = 0
     qdii_friction_streak: int = 0
     qdii_recovery_streak: int = 0
+    events: list[SimulationEvent] = field(default_factory=list)
 
 
 def _first_trading_days_per_month(index: pd.DatetimeIndex) -> set[pd.Timestamp]:
@@ -236,11 +251,26 @@ def _process_qdii_backlog(shares: dict[str, float], day_prices: pd.Series, confi
         _park_in_cash(shares, unfilled, day_prices)
 
 
-def _handle_qdii_unfilled(shares: dict[str, float], unfilled: float, day_prices: pd.Series, ctx: _SimContext) -> None:
+def _handle_qdii_unfilled(
+    shares: dict[str, float],
+    unfilled: float,
+    day_prices: pd.Series,
+    ctx: _SimContext,
+    dt: pd.Timestamp | None = None,
+) -> None:
     if unfilled <= 0:
         return
     ctx.qdii_backlog += unfilled
     _park_in_cash(shares, unfilled, day_prices)
+    if dt is not None:
+        ctx.events.append(
+            SimulationEvent(
+                date=dt.strftime("%Y-%m-%d"),
+                event_type="pending_cash",
+                cash_amount=unfilled,
+                note="qdii_quota_unfilled",
+            )
+        )
 
 
 def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp) -> None:
@@ -248,9 +278,17 @@ def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_pr
         return
     if config.is_qdii_symbol(symbol):
         unfilled = _buy_qdii_with_quota(shares, amount, day_prices, config, ctx, dt)
-        _handle_qdii_unfilled(shares, unfilled, day_prices, ctx)
+        _handle_qdii_unfilled(shares, unfilled, day_prices, ctx, dt)
         return
     _buy(shares, symbol, amount, day_prices[symbol], config.qdii_premium if symbol == QDII_SYMBOL else 0.0)
+    ctx.events.append(
+        SimulationEvent(
+            date=dt.strftime("%Y-%m-%d"),
+            event_type="purchase",
+            symbol=symbol,
+            cash_amount=amount,
+        )
+    )
 
 
 def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, dt: pd.Timestamp) -> tuple[float, list[RebalanceShortfallEvent]]:
@@ -366,7 +404,7 @@ def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: Strategy
         if buy_amt > 0:
             rebalance_cash -= buy_amt
             unfilled = _buy_qdii_with_quota(shares, buy_amt, day_prices, config, ctx, dt)
-            _handle_qdii_unfilled(shares, unfilled, day_prices, ctx)
+            _handle_qdii_unfilled(shares, unfilled, day_prices, ctx, dt)
 
     ctx.post_rebalance_deviations.append(_max_quadrant_deviation(shares, day_prices, config, ctx.qdii_backlog))
 
@@ -448,9 +486,24 @@ def simulate(
         if i > 0:
             _process_qdii_backlog(shares, day_prices, config, ctx, dt)
         if i == 0:
+            ctx.events.append(
+                SimulationEvent(
+                    date=dt.strftime("%Y-%m-%d"),
+                    event_type="base_position",
+                    cash_amount=base_capital,
+                )
+            )
             _proportional_contribution(shares, base_capital, day_prices, config, ctx, dt)
         else:
             if dt in month_starts:
+                ctx.events.append(
+                    SimulationEvent(
+                        date=dt.strftime("%Y-%m-%d"),
+                        event_type="contribution",
+                        cash_amount=monthly_contribution,
+                        note=config.dca_method,
+                    )
+                )
                 if config.dca_method == "proportional":
                     _proportional_contribution(shares, monthly_contribution, day_prices, config, ctx, dt)
                 else:
@@ -470,6 +523,13 @@ def simulate(
                         extra = 0.0
                     _rebalance(shares, day_prices, config, ctx, dt, extra)
                     rebalance_events.append(dt.strftime("%Y-%m-%d"))
+                    ctx.events.append(
+                        SimulationEvent(
+                            date=dt.strftime("%Y-%m-%d"),
+                            event_type="rebalance",
+                            cash_amount=0.0,
+                        )
+                    )
 
         _record_weight_gap(shares, day_prices, config, ctx, dt)
         ctx.backlog_history.append(ctx.qdii_backlog)
@@ -500,6 +560,7 @@ def simulate(
         qdii_metrics=_build_qdii_metrics(ctx),
         rebalance_shortfalls=list(ctx.rebalance_shortfalls),
         rebalance_metrics=_build_rebalance_metrics(ctx),
+        events=list(ctx.events),
     )
 
 
@@ -538,14 +599,23 @@ def simulate_lifecycle(
     if interrupted:
         lifecycle.loc[month_periods.isin(interrupted)] = 0.0
 
+    lifecycle_events: list[SimulationEvent] = []
     if scenario_id == "one_time_liquidity_20pct" and len(lifecycle) > 0:
-        drawdown_floor = lifecycle.cummax() * 0.8
         drawdown_mask = lifecycle < lifecycle.cummax()
         if drawdown_mask.any():
             trigger_idx = lifecycle[drawdown_mask].index[0]
         else:
             trigger_idx = lifecycle.index[len(lifecycle) // 2]
         lifecycle.loc[trigger_idx:] = lifecycle.loc[trigger_idx:] * 0.8
+        lifecycle_events.append(
+            SimulationEvent(
+                date=trigger_idx.strftime("%Y-%m-%d"),
+                event_type="liquidity",
+                cash_amount=float(lifecycle.loc[trigger_idx]) * 0.25,
+                scenario_id=scenario_id,
+                note="one_time_liquidity_20pct",
+            )
+        )
 
     if withdrawal_rate > 0:
         if withdrawal_mode == "annual":
@@ -568,8 +638,26 @@ def simulate_lifecycle(
                 peak = values.cummax()
                 floor = peak * (1 - withdrawal_rate)
                 lifecycle.loc[mask] = values.clip(lower=floor)
+                lifecycle_events.append(
+                    SimulationEvent(
+                        date=values.index[0].strftime("%Y-%m-%d"),
+                        event_type="withdrawal",
+                        cash_amount=float(values.iloc[0] * withdrawal_rate),
+                        weight=withdrawal_rate,
+                        scenario_id=scenario_id,
+                    )
+                )
         else:
             lifecycle = lifecycle * max(0.0, 1.0 - withdrawal_rate)
+            lifecycle_events.append(
+                SimulationEvent(
+                    date=lifecycle.index[0].strftime("%Y-%m-%d"),
+                    event_type="withdrawal",
+                    cash_amount=0.0,
+                    weight=withdrawal_rate,
+                    scenario_id=scenario_id,
+                )
+            )
 
     peak = lifecycle.cummax()
     dd = lifecycle / peak - 1
@@ -583,6 +671,7 @@ def simulate_lifecycle(
         max_drawdown=float(dd.min()),
         depleted=depleted,
         recovery_days=recovery_days,
+        events=lifecycle_events,
     )
 
 
