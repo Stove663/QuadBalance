@@ -90,6 +90,7 @@ def compute_metrics(
     risk_free_annual: float,
     no_rebalance_result: SimulationResult | None = None,
     inflation_annual: float = 0.03,
+    include_rebalance_premium: bool = True,
 ) -> PerformanceMetrics:
     daily = result.daily_values
     daily_returns = daily.pct_change().dropna()
@@ -107,7 +108,7 @@ def compute_metrics(
     worst_year = float(annual_rets.min()) if len(annual_rets) else 0.0
 
     rebalance_premium = 0.0
-    if no_rebalance_result is not None:
+    if include_rebalance_premium and no_rebalance_result is not None:
         nr = no_rebalance_result.daily_values
         nr_total = nr.iloc[-1] / nr.iloc[0] - 1
         nr_years = len(nr) / 252
@@ -117,6 +118,10 @@ def compute_metrics(
     real_factor = (1.0 + inflation_annual) ** years if years > 0 else 1.0
     real_terminal = daily.iloc[-1] / real_factor if real_factor > 0 else daily.iloc[-1]
     real_ann_return = ((1 + ann_return) / (1 + inflation_annual) - 1) if inflation_annual > -1 else ann_return
+
+    worst_1y = _worst_rolling_return(daily, 252)
+    worst_3y = _worst_rolling_return(daily, 252 * 3)
+    worst_5y = _worst_rolling_return(daily, 252 * 5)
 
     return PerformanceMetrics(
         annualized_return=ann_return,
@@ -131,12 +136,12 @@ def compute_metrics(
         annual_returns=annual_rets,
         real_annualized_return=real_ann_return,
         real_terminal_wealth=real_terminal,
-        worst_rolling_1y_return=_worst_rolling_return(daily, 252),
-        worst_rolling_3y_return=_worst_rolling_return(daily, 252 * 3),
-        worst_rolling_5y_return=_worst_rolling_return(daily, 252 * 5),
-        worst_rolling_1y_real_return=_worst_rolling_return(daily, 252),
-        worst_rolling_3y_real_return=_worst_rolling_return(daily, 252 * 3),
-        worst_rolling_5y_real_return=_worst_rolling_return(daily, 252 * 5),
+        worst_rolling_1y_return=worst_1y,
+        worst_rolling_3y_return=worst_3y,
+        worst_rolling_5y_return=worst_5y,
+        worst_rolling_1y_real_return=worst_1y,
+        worst_rolling_3y_real_return=worst_3y,
+        worst_rolling_5y_real_return=worst_5y,
         longest_underwater_days=_longest_underwater_days(daily),
     )
 

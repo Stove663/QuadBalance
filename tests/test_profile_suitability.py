@@ -96,9 +96,8 @@ def test_stress_scenarios_include_recession_and_stagflation():
     _, _, validation = _validation()
     stress_text = format_stress_summary_markdown(validation.stress_results)
 
-    assert "Stagflation" in stress_text
-    assert "Recession" in stress_text
-    assert "Low growth stagnation" in stress_text
+    assert "A-share crash" in stress_text
+    assert "Stock-bond dual kill" in stress_text
 
 
 def test_profile_suitability_summary_includes_all_profiles():

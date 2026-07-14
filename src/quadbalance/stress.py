@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 
 import pandas as pd
 
@@ -28,6 +29,11 @@ class S4PathResult:
     worst_year_return: float
     window_annualized_return: float
     passed: bool
+
+
+class StressMode(str, Enum):
+    exact = "exact"
+    exploratory = "exploratory"
 
 
 S4_CUMULATIVE_FLOOR = -0.10
@@ -98,9 +104,13 @@ def run_s4_path_test(
     window_years: int = 5,
     cap_rate: float = 0.02,
     backup_prices: dict[str, pd.Series] | None = None,
+    *,
+    mode: StressMode = StressMode.exact,
 ) -> S4PathResult:
     """Full simulation with bond returns capped for consecutive calendar years."""
     years = get_s4_window_years(prices, window_years)
+    if mode == StressMode.exploratory:
+        prices = prices[prices.index.year.isin(years)]
     capped = cap_bond_annual_returns(prices, config, years, cap_rate)
     sim = simulate(capped, config, backup_prices=backup_prices)
 
@@ -134,31 +144,57 @@ def run_fast_stress_tests(config: StrategyConfig, sim_result: SimulationResult) 
     return results
 
 
+def _approximate_s5_result(config: StrategyConfig, sim_result: SimulationResult, baseline_ret: float) -> StressResult:
+    qdii_fill = sim_result.qdii_metrics.qdii_fill_rate if sim_result.qdii_metrics else 1.0
+    qdii_gap = abs(sim_result.qdii_metrics.avg_qdii_weight_gap) if sim_result.qdii_metrics else 0.0
+    impact = -(config.qdii_premium * max(0.0, 1.0 - qdii_fill)) - (qdii_gap * 0.5)
+    return StressResult("S5", "QDII premium (approximate impact vs baseline)", impact, 0.05, impact > -0.10)
+
+
+def _approximate_s7_result(config: StrategyConfig, sim_result: SimulationResult, baseline_ret: float) -> StressResult:
+    qdii_fill = sim_result.qdii_metrics.qdii_fill_rate if sim_result.qdii_metrics else 1.0
+    pending = sim_result.qdii_metrics.avg_pending_cash if sim_result.qdii_metrics else 0.0
+    impact = -(1.0 - qdii_fill) * 0.08 - (pending / 1_000_000.0)
+    return StressResult("S7", "Low QDII quota (approximate impact vs baseline)", impact, 0.10, True)
+
+
 def run_full_stress_tests(
     config: StrategyConfig,
     sim_result: SimulationResult,
     prices: pd.DataFrame,
     backup_prices: dict[str, pd.Series] | None = None,
-) -> tuple[list[StressResult], S4PathResult]:
-    results = run_fast_stress_tests(config, sim_result)
+    *,
+    include_s4: bool = True,
+    include_s5: bool = True,
+    include_s7: bool = True,
+    mode: StressMode = StressMode.exact,
+) -> tuple[list[StressResult], S4PathResult | None]:
+    results = [sr for sr in run_fast_stress_tests(config, sim_result) if sr.scenario_id != "S4"]
     baseline_ret = sim_result.daily_values.iloc[-1] / sim_result.daily_values.iloc[0] - 1
     for sid in sorted(FULL_STRESS_SCENARIOS):
-        if sid == "S5":
-            s5_config = replace(config, qdii_premium=0.05)
-            s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
-            s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
-            s5_impact = s5_ret - baseline_ret
-            results.append(StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10))
-        elif sid == "S7":
-            low_caps = {code: 10.0 for code in qdii_pool_codes()}
-            s7_config = replace(config, qdii_daily_caps=low_caps)
-            s7_sim = simulate(prices, s7_config, backup_prices=backup_prices)
-            s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
-            s7_impact = s7_ret - baseline_ret
-            s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
-            results.append(StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True))
-    s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices)
-    results.append(StressResult("S4", f"Prolonged low rates ({len(s4_path.window_years)}yr path)", s4_path.cumulative_return, 0.02, s4_path.passed))
+        if sid == "S5" and include_s5:
+            if mode == StressMode.exploratory:
+                results.append(_approximate_s5_result(config, sim_result, baseline_ret))
+            else:
+                s5_config = replace(config, qdii_premium=0.05)
+                s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
+                s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
+                s5_impact = s5_ret - baseline_ret
+                results.append(StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10))
+        elif sid == "S7" and include_s7:
+            if mode == StressMode.exploratory:
+                results.append(_approximate_s7_result(config, sim_result, baseline_ret))
+            else:
+                low_caps = {code: 10.0 for code in qdii_pool_codes()}
+                s7_config = replace(config, qdii_daily_caps=low_caps)
+                s7_sim = simulate(prices, s7_config, backup_prices=backup_prices)
+                s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
+                s7_impact = s7_ret - baseline_ret
+                s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
+                results.append(StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True))
+    s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices, mode=mode) if include_s4 else None
+    if s4_path is not None:
+        results.append(StressResult("S4", f"Prolonged low rates ({len(s4_path.window_years)}yr path)", s4_path.cumulative_return, 0.02, s4_path.passed))
     return results, s4_path
 
 

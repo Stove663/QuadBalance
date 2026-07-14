@@ -17,7 +17,7 @@ from quadbalance.profile_thresholds import InvestorProfile, load_profile_thresho
 from quadbalance.proxy_sensitivity import run_sensitivity, write_sensitivity_outputs
 from quadbalance.reporting import generate_lock_document
 from quadbalance.simulator import LifecycleResult, SimulationResult, simulate, simulate_lifecycle
-from quadbalance.stress import S4PathResult, StressResult, run_fast_stress_tests, run_full_stress_tests
+from quadbalance.stress import S4PathResult, StressMode, StressResult, run_fast_stress_tests, run_full_stress_tests
 from quadbalance.sweep_constants import (
     DEFAULT_INFLATION_ANN,
     SENSITIVITY_OUTPUT_FILENAME,
@@ -28,6 +28,7 @@ from quadbalance.sweep_space import generate_sweep_configs
 from quadbalance.validation import ValidationResult, evaluate_acceptance
 
 PassBundle = tuple[ValidationResult, StrategyConfig, SimulationResult]
+SimulationCacheKey = tuple[str, bool, str]
 
 
 @dataclass
@@ -73,6 +74,10 @@ def _profile_rank(classification: str) -> int:
 def _qdii_fill(bundle: PassBundle) -> float:
     qm = bundle[2].qdii_metrics
     return qm.qdii_fill_rate if qm else 1.0
+
+
+def _simulation_cache_key(config: StrategyConfig, enable_rebalance: bool, stress_tag: str = "baseline") -> SimulationCacheKey:
+    return (config.config_id, enable_rebalance, stress_tag)
 
 
 def _lock_sort_key(bundle: PassBundle, intended_profile: str | None) -> tuple:
@@ -167,10 +172,28 @@ def _run_config(
     benchmarks,
     rf: float,
     profiles: tuple[InvestorProfile, ...],
+    include_rebalance_premium: bool,
+    simulation_cache: dict[SimulationCacheKey, SimulationResult],
 ) -> tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]:
-    result = simulate(prices, config, backup_prices=backup_prices)
-    no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
-    metrics = compute_metrics(result, config, prices, rf, no_rebal, inflation_annual=DEFAULT_INFLATION_ANN)
+    baseline_key = _simulation_cache_key(config, True, "baseline")
+    if baseline_key not in simulation_cache:
+        simulation_cache[baseline_key] = simulate(prices, config, backup_prices=backup_prices)
+    result = simulation_cache[baseline_key]
+    no_rebal = None
+    if include_rebalance_premium:
+        nr_key = _simulation_cache_key(config, False, "no_rebalance")
+        if nr_key not in simulation_cache:
+            simulation_cache[nr_key] = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
+        no_rebal = simulation_cache[nr_key]
+    metrics = compute_metrics(
+        result,
+        config,
+        prices,
+        rf,
+        no_rebal,
+        inflation_annual=DEFAULT_INFLATION_ANN,
+        include_rebalance_premium=include_rebalance_premium,
+    )
     fast_stress = run_fast_stress_tests(config, result)
     validation = _fast_validate(config, metrics, benchmarks, fast_stress)
     qm = result.qdii_metrics
@@ -194,7 +217,7 @@ def _run_config(
     if not validation.passed:
         return row, validation, config, result, None, fast_stress
 
-    full_stress, s4_path = run_full_stress_tests(config, result, prices, backup_prices)
+    full_stress, s4_path = run_full_stress_tests(config, result, prices, backup_prices, mode=StressMode.exact)
     validation = _fast_validate(config, metrics, benchmarks, full_stress)
     validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
     _attach_profile_defaults(validation, profiles)
@@ -221,26 +244,54 @@ def run_sweep(
     first_pass_bundle: PassBundle | None = None
     first_s4_path: S4PathResult | None = None
     sensitivity_frames: list[pd.DataFrame] = []
+    staged_results: list[tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]] = []
 
     max_workers = min(8, max(1, len(configs)))
+    shortlist_size = min(5, len(configs))
+    simulation_cache: dict[SimulationCacheKey, SimulationResult] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_run_config, config, prices, backup_prices, benchmarks, rf, profiles): config
+            executor.submit(_run_config, config, prices, backup_prices, benchmarks, rf, profiles, False, simulation_cache): config
             for config in configs
         }
         for future in as_completed(futures):
-            row, validation, config, result, s4_path, _stress = future.result()
+            row, validation, config, result, s4_path, stress = future.result()
             rows.append(row)
+            staged_results.append((row, validation, config, result, s4_path, stress))
+
+    shortlisted = sorted(
+        [item for item in staged_results if item[1].passed],
+        key=lambda item: _lock_sort_key((item[1], item[2], item[3]), intended_profile),
+        reverse=True,
+    )[:shortlist_size]
+
+    exact_candidates: list[PassBundle] = []
+    exact_s4_paths: dict[str, S4PathResult | None] = {}
+    for _, validation, config, result, _s4_path, _stress in shortlisted:
+        full_stress, exact_s4_path = run_full_stress_tests(config, result, prices, backup_prices, mode=StressMode.exact)
+        exact_validation = _fast_validate(config, validation.metrics, benchmarks, full_stress)
+        exact_validation.profile_suitability = validation.profile_suitability
+        _attach_profile_defaults(exact_validation, profiles)
+        exact_bundle: PassBundle = (exact_validation, config, result)
+        exact_candidates.append(exact_bundle)
+        exact_s4_paths[config.config_id] = exact_s4_path
+
+    for candidate in exact_candidates:
+        if first_pass_bundle is None:
+            first_pass_bundle = candidate
+            first_s4_path = exact_s4_paths[candidate[1].config_id]
+            continue
+        preferred = prefer_lock_candidate(first_pass_bundle, candidate, intended_profile)
+        if preferred is candidate:
+            first_pass_bundle = candidate
+            first_s4_path = exact_s4_paths[candidate[1].config_id]
+
+    if first_pass_bundle is None:
+        for row, validation, config, result, s4_path, _stress in staged_results:
             if validation.passed:
-                candidate_bundle: PassBundle = (validation, config, result)
-                if first_pass_bundle is None:
-                    first_pass_bundle = candidate_bundle
-                    first_s4_path = s4_path
-                else:
-                    preferred = prefer_lock_candidate(first_pass_bundle, candidate_bundle, intended_profile)
-                    if preferred is candidate_bundle:
-                        first_pass_bundle = candidate_bundle
-                        first_s4_path = s4_path
+                first_pass_bundle = (validation, config, result)
+                first_s4_path = s4_path
+                break
 
     df = pd.DataFrame([asdict(r) for r in rows])
     output_dir.mkdir(parents=True, exist_ok=True)
