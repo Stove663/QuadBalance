@@ -30,8 +30,9 @@ class S4PathResult:
     passed: bool
 
 
-
 S4_CUMULATIVE_FLOOR = -0.10
+FAST_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid in {"S1", "S2", "S3", "S6"}}
+FULL_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid not in FAST_STRESS_SCENARIOS}
 
 
 def _median_quadrant_returns(annual_q: pd.DataFrame) -> dict[str, float]:
@@ -42,9 +43,7 @@ def _median_quadrant_returns(annual_q: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _portfolio_return_from_quadrants(
-    config: StrategyConfig, quadrant_returns: dict[str, float]
-) -> float:
+def _portfolio_return_from_quadrants(config: StrategyConfig, quadrant_returns: dict[str, float]) -> float:
     w = config.quadrant_weights
     return sum(w[q] * quadrant_returns.get(q, 0.0) for q in w)
 
@@ -68,9 +67,7 @@ def cap_bond_annual_returns(
 ) -> pd.DataFrame:
     """Cap bond instrument annual returns at cap_rate for each year in window."""
     result = prices.copy()
-    bond_symbols = [
-        s for s in config.symbols() if config.quadrant_for_symbol(s) == "bonds"
-    ]
+    bond_symbols = [s for s in config.symbols() if config.quadrant_for_symbol(s) == "bonds"]
 
     for year in window_years:
         for sym in bond_symbols:
@@ -91,9 +88,7 @@ def cap_bond_annual_returns(
             span = end_p - start_p
             if span == 0:
                 continue
-            result.loc[mask, sym] = start_p + (year_prices - start_p) * (
-                (target_end - start_p) / span
-            )
+            result.loc[mask, sym] = start_p + (year_prices - start_p) * ((target_end - start_p) / span)
     return result
 
 
@@ -116,21 +111,55 @@ def run_s4_path_test(
         return S4PathResult(years, 0.0, 0.0, 0.0, True)
 
     cumulative = window_daily.iloc[-1] / window_daily.iloc[0] - 1.0
-    annual = window_daily.groupby(window_daily.index.year).apply(
-        lambda s: s.iloc[-1] / s.iloc[0] - 1.0
-    )
+    annual = window_daily.groupby(window_daily.index.year).apply(lambda s: s.iloc[-1] / s.iloc[0] - 1.0)
     worst_year = float(annual.min()) if len(annual) else 0.0
     span_years = len(years)
     window_ann = (1.0 + cumulative) ** (1.0 / span_years) - 1.0 if span_years else 0.0
     passed = cumulative >= S4_CUMULATIVE_FLOOR
 
-    return S4PathResult(
-        window_years=years,
-        cumulative_return=cumulative,
-        worst_year_return=worst_year,
-        window_annualized_return=window_ann,
-        passed=passed,
-    )
+    return S4PathResult(years, cumulative, worst_year, window_ann, passed)
+
+
+def run_fast_stress_tests(config: StrategyConfig, sim_result: SimulationResult) -> list[StressResult]:
+    medians = _median_quadrant_returns(sim_result.annual_quadrant_returns)
+    results: list[StressResult] = []
+    for sid in sorted(FAST_STRESS_SCENARIOS):
+        name, shocks = STRESS_SCENARIOS[sid]
+        q_returns = dict(medians)
+        q_returns.update(shocks)
+        port_ret = _portfolio_return_from_quadrants(config, q_returns)
+        worst = _worst_shock(shocks)
+        passed = port_ret >= -worst
+        results.append(StressResult(sid, name, port_ret, worst, passed))
+    return results
+
+
+def run_full_stress_tests(
+    config: StrategyConfig,
+    sim_result: SimulationResult,
+    prices: pd.DataFrame,
+    backup_prices: dict[str, pd.Series] | None = None,
+) -> tuple[list[StressResult], S4PathResult]:
+    results = run_fast_stress_tests(config, sim_result)
+    baseline_ret = sim_result.daily_values.iloc[-1] / sim_result.daily_values.iloc[0] - 1
+    for sid in sorted(FULL_STRESS_SCENARIOS):
+        if sid == "S5":
+            s5_config = replace(config, qdii_premium=0.05)
+            s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
+            s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
+            s5_impact = s5_ret - baseline_ret
+            results.append(StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10))
+        elif sid == "S7":
+            low_caps = {code: 10.0 for code in qdii_pool_codes()}
+            s7_config = replace(config, qdii_daily_caps=low_caps)
+            s7_sim = simulate(prices, s7_config, backup_prices=backup_prices)
+            s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
+            s7_impact = s7_ret - baseline_ret
+            s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
+            results.append(StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True))
+    s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices)
+    results.append(StressResult("S4", f"Prolonged low rates ({len(s4_path.window_years)}yr path)", s4_path.cumulative_return, 0.02, s4_path.passed))
+    return results, s4_path
 
 
 def run_stress_tests(
@@ -138,53 +167,8 @@ def run_stress_tests(
     sim_result: SimulationResult,
     prices: pd.DataFrame,
     backup_prices: dict[str, pd.Series] | None = None,
-) -> tuple[list[StressResult], S4PathResult]:
-    medians = _median_quadrant_returns(sim_result.annual_quadrant_returns)
-    results: list[StressResult] = []
-
-    for sid, (name, shocks) in STRESS_SCENARIOS.items():
-        q_returns = dict(medians)
-        q_returns.update(shocks)
-        port_ret = _portfolio_return_from_quadrants(config, q_returns)
-        worst = _worst_shock(shocks)
-        passed = port_ret >= -worst
-        results.append(StressResult(sid, name, port_ret, worst, passed))
-
-    s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices)
-    results.append(
-        StressResult(
-            "S4",
-            f"Prolonged low rates ({len(s4_path.window_years)}yr path)",
-            s4_path.cumulative_return,
-            0.02,
-            s4_path.passed,
-        )
-    )
-
-    baseline_ret = sim_result.daily_values.iloc[-1] / sim_result.daily_values.iloc[0] - 1
-
-    s5_config = replace(config, qdii_premium=0.05)
-    s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
-    s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
-    s5_impact = s5_ret - baseline_ret
-    results.append(
-        StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10)
-    )
-
-    low_caps = {code: 10.0 for code in qdii_pool_codes()}
-    s7_config = replace(config, qdii_daily_caps=low_caps)
-    s7_sim = simulate(prices, s7_config, backup_prices=backup_prices)
-    s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
-    s7_impact = s7_ret - baseline_ret
-    s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
-    results.append(
-        StressResult(
-            "S7",
-            f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)",
-            s7_impact,
-            0.10,
-            True,
-        )
-    )
-
-    return results, s4_path
+    fast_only: bool = False,
+) -> tuple[list[StressResult], S4PathResult | None]:
+    if fast_only:
+        return run_fast_stress_tests(config, sim_result), None
+    return run_full_stress_tests(config, sim_result, prices, backup_prices)

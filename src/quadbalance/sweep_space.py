@@ -15,14 +15,23 @@ DcaMethod = Literal["proportional", "underweight"]
 
 SWEEP_BOND_VARIANTS: tuple[BondVariant, ...] = ("B1", "B2", "B3")
 SWEEP_DCA_METHODS: tuple[DcaMethod, ...] = ("proportional", "underweight")
-SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.05, 0.10)
+# Conservative shrink: keep one representative rebalance threshold to reduce sweep size.
+SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.05,)
+# Keep a compact but diverse allocation subset for routine sweeps.
+SWEEP_ALLOCATIONS: tuple[str, ...] = (
+    "25-25-25-25",
+    "20-30-25-25",
+    "30-20-25-25",
+    "40-20-20-20",
+)
 
 
 def generate_sweep_configs() -> list["StrategyConfig"]:
     from quadbalance.config import StrategyConfig
 
     configs: list[StrategyConfig] = []
-    for alloc_name, (s, b, g, c) in ALLOCATION_VARIANTS.items():
+    for alloc_name in SWEEP_ALLOCATIONS:
+        s, b, g, c = ALLOCATION_VARIANTS[alloc_name]
         for bond in SWEEP_BOND_VARIANTS:
             for dca in SWEEP_DCA_METHODS:
                 for threshold in SWEEP_REBALANCE_THRESHOLDS:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from quadbalance.profile_thresholds import InvestorProfile, load_profile_thresho
 from quadbalance.proxy_sensitivity import run_sensitivity, write_sensitivity_outputs
 from quadbalance.reporting import generate_lock_document
 from quadbalance.simulator import LifecycleResult, SimulationResult, simulate, simulate_lifecycle
-from quadbalance.stress import S4PathResult, run_stress_tests
+from quadbalance.stress import S4PathResult, StressResult, run_fast_stress_tests, run_full_stress_tests
 from quadbalance.sweep_constants import (
     DEFAULT_INFLATION_ANN,
     SENSITIVITY_OUTPUT_FILENAME,
@@ -74,10 +75,7 @@ def _qdii_fill(bundle: PassBundle) -> float:
     return qm.qdii_fill_rate if qm else 1.0
 
 
-def _lock_sort_key(
-    bundle: PassBundle,
-    intended_profile: str | None,
-) -> tuple:
+def _lock_sort_key(bundle: PassBundle, intended_profile: str | None) -> tuple:
     validation, config, _ = bundle
     metrics = validation.metrics
     suitability_rank = 0
@@ -90,34 +88,22 @@ def _lock_sort_key(
         metrics.annualized_return,
         -abs(metrics.max_drawdown),
         _qdii_fill(bundle),
-        # invert config_id for ascending via negated tuple trick: use separate compare
         config.config_id,
     )
 
 
-def prefer_lock_candidate(
-    current: PassBundle,
-    candidate: PassBundle,
-    intended_profile: str | None,
-) -> PassBundle:
-    """Deterministic multi-key lock selection. Higher key wins except config_id ascending."""
+def prefer_lock_candidate(current: PassBundle, candidate: PassBundle, intended_profile: str | None) -> PassBundle:
     curr_key = _lock_sort_key(current, intended_profile)
     cand_key = _lock_sort_key(candidate, intended_profile)
-    # Compare numeric prefixes; for final config_id, smaller wins.
     for i in range(4):
         if cand_key[i] != curr_key[i]:
             return candidate if cand_key[i] > curr_key[i] else current
     return candidate if cand_key[4] < curr_key[4] else current
 
 
-def _attach_profile_defaults(
-    validation: ValidationResult,
-    investor_profiles: tuple[InvestorProfile, ...],
-) -> None:
+def _attach_profile_defaults(validation: ValidationResult, investor_profiles: tuple[InvestorProfile, ...]) -> None:
     for profile in investor_profiles:
-        validation.profile_suitability.setdefault(
-            profile.profile_id, {"classification": "caution", "reasons": []}
-        )
+        validation.profile_suitability.setdefault(profile.profile_id, {"classification": "caution", "reasons": []})
 
 
 def _build_lifecycle_results(prices: pd.DataFrame, config: StrategyConfig) -> list[LifecycleResult]:
@@ -134,13 +120,7 @@ def _build_lifecycle_results(prices: pd.DataFrame, config: StrategyConfig) -> li
     ]
 
 
-def _populate_row(
-    config: StrategyConfig,
-    metrics,
-    validation: ValidationResult,
-    qm,
-    rm,
-) -> SweepRow:
+def _populate_row(config: StrategyConfig, metrics, validation: ValidationResult, qm, rm) -> SweepRow:
     return SweepRow(
         config_id=config.config_id,
         allocation=config.allocation_name,
@@ -171,13 +151,55 @@ def _populate_row(
         max_post_rebalance_deviation=rm.max_post_rebalance_deviation if rm else 0.0,
         accumulation_suitability=validation.profile_suitability["accumulation"]["classification"],
         balanced_core_suitability=validation.profile_suitability["balanced_core"]["classification"],
-        pre_retirement_preservation_suitability=validation.profile_suitability[
-            "pre_retirement_preservation"
-        ]["classification"],
-        retirement_withdrawal_suitability=validation.profile_suitability["retirement_withdrawal"][
-            "classification"
-        ],
+        pre_retirement_preservation_suitability=validation.profile_suitability["pre_retirement_preservation"]["classification"],
+        retirement_withdrawal_suitability=validation.profile_suitability["retirement_withdrawal"]["classification"],
     )
+
+
+def _fast_validate(config: StrategyConfig, metrics, benchmarks, stress: list[StressResult]) -> ValidationResult:
+    return evaluate_acceptance(config, metrics, benchmarks, stress)
+
+
+def _run_config(
+    config: StrategyConfig,
+    prices: pd.DataFrame,
+    backup_prices: dict[str, pd.Series],
+    benchmarks,
+    rf: float,
+    profiles: tuple[InvestorProfile, ...],
+) -> tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]:
+    result = simulate(prices, config, backup_prices=backup_prices)
+    no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
+    metrics = compute_metrics(result, config, prices, rf, no_rebal, inflation_annual=DEFAULT_INFLATION_ANN)
+    fast_stress = run_fast_stress_tests(config, result)
+    validation = _fast_validate(config, metrics, benchmarks, fast_stress)
+    qm = result.qdii_metrics
+    rm = result.rebalance_metrics
+    qdii_fill = qm.qdii_fill_rate if qm else 1.0
+    qdii_gap = qm.avg_qdii_weight_gap if qm else 0.0
+    qdii_friction_months = qm.qdii_friction_months if qm else 0
+    qdii_recovery_months = qm.qdii_recovery_months if qm else 0
+    suitability = classify_suitability(
+        config,
+        metrics,
+        qdii_fill,
+        qdii_gap,
+        qdii_friction_months,
+        qdii_recovery_months,
+        investor_profiles=profiles,
+    )
+    validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
+    _attach_profile_defaults(validation, profiles)
+    row = _populate_row(config, metrics, validation, qm, rm)
+    if not validation.passed:
+        return row, validation, config, result, None, fast_stress
+
+    full_stress, s4_path = run_full_stress_tests(config, result, prices, backup_prices)
+    validation = _fast_validate(config, metrics, benchmarks, full_stress)
+    validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
+    _attach_profile_defaults(validation, profiles)
+    row = _populate_row(config, metrics, validation, qm, rm)
+    return row, validation, config, result, s4_path, full_stress
 
 
 def run_sweep(
@@ -188,64 +210,37 @@ def run_sweep(
     profile_thresholds_path: Path | None = None,
     investor_profiles: tuple[InvestorProfile, ...] | None = None,
 ) -> tuple[pd.DataFrame, ValidationResult | None, StrategyConfig | None]:
-    """Run full parameter sweep and return results."""
     profiles = investor_profiles if investor_profiles is not None else load_profile_thresholds(profile_thresholds_path)
     prices, price_meta = load_price_matrix_with_meta(use_cache=use_cache)
     backup_prices = load_backup_prices(use_cache=use_cache)
     benchmarks = run_benchmarks(prices)
     rf = cash_risk_free_rate(prices)
 
+    configs = generate_sweep_configs()
     rows: list[SweepRow] = []
     first_pass_bundle: PassBundle | None = None
     first_s4_path: S4PathResult | None = None
     sensitivity_frames: list[pd.DataFrame] = []
 
-    for config in generate_sweep_configs():
-        result = simulate(prices, config, backup_prices=backup_prices)
-        no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
-        metrics = compute_metrics(result, config, prices, rf, no_rebal, inflation_annual=DEFAULT_INFLATION_ANN)
-        stress, s4_path = run_stress_tests(config, result, prices, backup_prices)
-        validation = evaluate_acceptance(config, metrics, benchmarks, stress)
-        qm = result.qdii_metrics
-        rm = result.rebalance_metrics
-        qdii_fill = qm.qdii_fill_rate if qm else 1.0
-        qdii_gap = qm.avg_qdii_weight_gap if qm else 0.0
-        qdii_friction_months = qm.qdii_friction_months if qm else 0
-        qdii_recovery_months = qm.qdii_recovery_months if qm else 0
-        suitability = classify_suitability(
-            config,
-            metrics,
-            qdii_fill,
-            qdii_gap,
-            qdii_friction_months,
-            qdii_recovery_months,
-            investor_profiles=profiles,
-        )
-        validation.profile_suitability = {
-            k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()
+    max_workers = min(8, max(1, len(configs)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_run_config, config, prices, backup_prices, benchmarks, rf, profiles): config
+            for config in configs
         }
-        _attach_profile_defaults(validation, profiles)
-
-        rows.append(_populate_row(config, metrics, validation, qm, rm))
-
-        if validation.passed:
-            candidate_bundle: PassBundle = (validation, config, result)
-            if first_pass_bundle is None:
-                first_pass_bundle = candidate_bundle
-                first_s4_path = s4_path
-            else:
-                preferred = prefer_lock_candidate(first_pass_bundle, candidate_bundle, intended_profile)
-                if preferred is candidate_bundle:
+        for future in as_completed(futures):
+            row, validation, config, result, s4_path, _stress = future.result()
+            rows.append(row)
+            if validation.passed:
+                candidate_bundle: PassBundle = (validation, config, result)
+                if first_pass_bundle is None:
                     first_pass_bundle = candidate_bundle
                     first_s4_path = s4_path
-
-        if full_sensitivity and validation.passed:
-            _, _, sens_df = run_sensitivity(
-                config, prices, price_meta, benchmarks, rf, backup_prices=backup_prices
-            )
-            sens_df = sens_df.copy()
-            sens_df.insert(0, "config_id", config.config_id)
-            sensitivity_frames.append(sens_df)
+                else:
+                    preferred = prefer_lock_candidate(first_pass_bundle, candidate_bundle, intended_profile)
+                    if preferred is candidate_bundle:
+                        first_pass_bundle = candidate_bundle
+                        first_s4_path = s4_path
 
     df = pd.DataFrame([asdict(r) for r in rows])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -262,13 +257,9 @@ def run_sweep(
             backup_prices=backup_prices,
         )
         if full_sensitivity and sensitivity_frames:
-            pd.concat(sensitivity_frames, ignore_index=True).to_csv(
-                output_dir / SENSITIVITY_OUTPUT_FILENAME, index=False
-            )
+            pd.concat(sensitivity_frames, ignore_index=True).to_csv(output_dir / SENSITIVITY_OUTPUT_FILENAME, index=False)
         else:
-            write_sensitivity_outputs(
-                sensitivity_summary, segments, sens_df, output_dir, first_pass_config.config_id
-            )
+            write_sensitivity_outputs(sensitivity_summary, segments, sens_df, output_dir, first_pass_config.config_id)
 
         first_pass.lifecycle_results = _build_lifecycle_results(prices, first_pass_config)
         generate_lock_document(

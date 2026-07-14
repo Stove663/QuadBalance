@@ -59,10 +59,12 @@ def format_lifecycle_summary(lifecycle_results: list[LifecycleResult]) -> str:
 def format_profile_suitability_summary(validation: ValidationResult) -> str:
     if not validation.profile_suitability:
         return ""
-    lines = ["## Investor Profile Suitability", "", "| Profile | Classification | Key Reasons |", "|---------|----------------|-------------|"]
+    lines = ["## Investor Profile Suitability", "", "| Profile | Classification | Key Reasons | Warnings | Governance Notes |", "|---------|----------------|-------------|----------|------------------|"]
     for profile, payload in validation.profile_suitability.items():
         reasons = "; ".join(payload.get("reasons", [])) or "—"
-        lines.append(f"| {profile} | {payload.get('classification', 'caution')} | {reasons} |")
+        warnings = "; ".join(payload.get("warnings", [])) or "—"
+        notes = "; ".join(payload.get("governance_notes", [])) or "—"
+        lines.append(f"| {profile} | {payload.get('classification', 'caution')} | {reasons} | {warnings} | {notes} |")
     lines.append("")
     return "\n".join(lines)
 

@@ -73,7 +73,23 @@ def test_classify_suitability_produces_default_profiles():
         "pre_retirement_preservation",
         "retirement_withdrawal",
     }
-    assert all(item.reasons is not None for item in suitability.values())
+    for item in suitability.values():
+        assert item.reasons is not None
+        assert item.drivers is not None
+        assert item.warnings is not None
+        assert item.governance_notes is not None
+
+
+def test_classify_suitability_includes_governance_notes_for_qdii_friction():
+    config = _config()
+    prices = _prices()
+    sim = simulate(prices, config)
+    no_rebal = simulate(prices, config, enable_rebalance=False)
+    metrics = compute_metrics(sim, config, prices, 0.02, no_rebal)
+    suitability = classify_suitability(config, metrics, 0.6, -0.05, qdii_friction_months=12, qdii_recovery_months=24)
+
+    assert any(suitability["accumulation"].warnings)
+    assert suitability["accumulation"].governance_notes
 
 
 def test_stress_scenarios_include_recession_and_stagflation():
@@ -107,6 +123,8 @@ def test_lock_document_includes_profile_suitability(tmp_path: Path):
 
     text = output.read_text(encoding="utf-8")
     assert "## Investor Profile Suitability" in text
+    assert "Warnings" in text
+    assert "Governance Notes" in text
     assert "accumulation" in text
     assert "balanced_core" in text
     assert "pre_retirement_preservation" in text

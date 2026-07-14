@@ -18,6 +18,9 @@ class ProfileSuitability:
     profile_id: str
     classification: str
     reasons: list[str]
+    drivers: list[str]
+    warnings: list[str]
+    governance_notes: list[str]
     qdii_friction_months: int = 0
     qdii_recovery_months: int = 0
 
@@ -138,70 +141,97 @@ def compute_metrics(
     )
 
 
-def _qdii_reasons(
+def _qdii_notes(
     qdii_fill_rate: float,
     avg_qdii_weight_gap: float,
     qdii_friction_months: int,
     qdii_recovery_months: int,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
+    warnings: list[str] = []
     if qdii_fill_rate < 0.9:
         reasons.append("QDII fill rate below 90% target")
     if avg_qdii_weight_gap < -0.02:
         reasons.append("QDII weight gap more than 2 percentage points below target")
+        warnings.append("Execution friction is suppressing QDII exposure")
     if qdii_friction_months >= 12:
         reasons.append("QDII exposure stayed more than 2 percentage points below target for at least 12 months")
+        warnings.append("Profile classification should note persistent execution friction")
     if qdii_recovery_months >= 24:
         reasons.append("QDII exposure failed to recover to at least 50% of target within 24 months")
-    return reasons
+        warnings.append("Persistent quota constraints may require review")
+    return reasons, warnings
 
 
-def _classify_accumulation(metrics: PerformanceMetrics, qdii_reasons: list[str], profile: InvestorProfile) -> ProfileSuitability:
+def _classify_accumulation(metrics: PerformanceMetrics, qdii_reasons: list[str], qdii_warnings: list[str], profile: InvestorProfile) -> ProfileSuitability:
     reasons: list[str] = []
+    drivers: list[str] = []
+    warnings: list[str] = []
     if metrics.real_annualized_return > 0:
         reasons.append("positive real annualized return")
+        drivers.append("real annualized return above zero")
     if metrics.annualized_return < 0.06:
         reasons.append("modest nominal growth may be too defensive for accumulation")
+        warnings.append("Nominal growth may lag long-horizon accumulation goals")
     if metrics.worst_rolling_5y_real_return < 0:
         reasons.append("5-year rolling real return can fall below zero")
+        drivers.append("negative 5-year rolling real return")
     reasons.extend(qdii_reasons)
+    warnings.extend(qdii_warnings)
     classification = "caution"
     if metrics.worst_rolling_5y_real_return < -0.10:
         classification = "unsuitable"
     elif metrics.real_annualized_return > profile.min_real_return and metrics.max_drawdown >= profile.max_drawdown:
         classification = "suitable"
-    return ProfileSuitability(profile.profile_id, classification, reasons)
+    governance = ["Accumulation classification should be reviewed if execution friction persists"] if warnings else []
+    return ProfileSuitability(profile.profile_id, classification, reasons, drivers, warnings, governance)
 
 
-def _classify_balanced(metrics: PerformanceMetrics, qdii_reasons: list[str], profile: InvestorProfile) -> ProfileSuitability:
+def _classify_balanced(metrics: PerformanceMetrics, qdii_reasons: list[str], qdii_warnings: list[str], profile: InvestorProfile) -> ProfileSuitability:
     reasons: list[str] = []
+    drivers: list[str] = []
+    warnings: list[str] = []
     if metrics.max_drawdown >= profile.max_drawdown:
         reasons.append("drawdown within moderate tolerance")
+        drivers.append("drawdown within profile tolerance")
     if metrics.real_annualized_return > 0:
         reasons.append("preserves purchasing power on average")
     reasons.extend(qdii_reasons)
+    warnings.extend(qdii_warnings)
     classification = "suitable" if metrics.max_drawdown >= profile.max_drawdown and metrics.worst_rolling_5y_real_return > -0.10 else "caution"
-    return ProfileSuitability(profile.profile_id, classification, reasons)
+    governance = ["Balanced core classification should be reviewed if execution friction persists"] if warnings else []
+    return ProfileSuitability(profile.profile_id, classification, reasons, drivers, warnings, governance)
 
 
-def _classify_preservation(metrics: PerformanceMetrics, qdii_fill_rate: float, profile: InvestorProfile) -> ProfileSuitability:
+def _classify_preservation(metrics: PerformanceMetrics, qdii_fill_rate: float, qdii_warnings: list[str], profile: InvestorProfile) -> ProfileSuitability:
     reasons: list[str] = []
+    drivers: list[str] = []
+    warnings: list[str] = []
     if metrics.longest_underwater_days > 252 * 3:
         reasons.append("extended underwater duration is risky near retirement")
+        drivers.append("long underwater duration")
     if qdii_fill_rate < 0.75:
         reasons.append("execution friction can worsen liquidity planning")
+        warnings.append("QDII fill rate is weak for pre-retirement liquidity needs")
+    warnings.extend(qdii_warnings)
     classification = "unsuitable" if metrics.max_drawdown < profile.max_drawdown or metrics.longest_underwater_days > 252 * profile.max_underwater_years else "caution"
-    return ProfileSuitability(profile.profile_id, classification, reasons)
+    governance = ["Pre-retirement suitability should be reviewed when execution friction or duration risks persist"] if warnings else []
+    return ProfileSuitability(profile.profile_id, classification, reasons, drivers, warnings, governance)
 
 
 def _classify_retirement(metrics: PerformanceMetrics, profile: InvestorProfile) -> ProfileSuitability:
     reasons: list[str] = []
+    drivers: list[str] = []
+    warnings: list[str] = []
     if metrics.worst_rolling_5y_real_return < -0.10:
         reasons.append("5-year real return breach threatens purchasing power")
+        drivers.append("negative 5-year rolling real return")
     if metrics.longest_underwater_days > 252 * 5:
         reasons.append("underwater duration too long for withdrawal phase")
+        warnings.append("Withdrawal phase may not tolerate long recovery periods")
     classification = "unsuitable" if metrics.real_terminal_wealth <= 0 or metrics.max_drawdown < profile.max_drawdown else "caution"
-    return ProfileSuitability(profile.profile_id, classification, reasons)
+    governance = ["Retirement suitability should be reviewed if depletion risk or underwater duration becomes excessive"] if warnings else []
+    return ProfileSuitability(profile.profile_id, classification, reasons, drivers, warnings, governance)
 
 
 def classify_suitability(
@@ -214,15 +244,15 @@ def classify_suitability(
     investor_profiles: tuple[InvestorProfile, ...] = DEFAULT_INVESTOR_PROFILES,
 ) -> dict[str, ProfileSuitability]:
     profiles: dict[str, ProfileSuitability] = {}
-    qdii_reasons = _qdii_reasons(qdii_fill_rate, avg_qdii_weight_gap, qdii_friction_months, qdii_recovery_months)
+    qdii_reasons, qdii_warnings = _qdii_notes(qdii_fill_rate, avg_qdii_weight_gap, qdii_friction_months, qdii_recovery_months)
 
     for profile in investor_profiles:
         if profile.profile_id == "accumulation":
-            profiles[profile.profile_id] = _classify_accumulation(metrics, qdii_reasons, profile)
+            profiles[profile.profile_id] = _classify_accumulation(metrics, qdii_reasons, qdii_warnings, profile)
         elif profile.profile_id == "balanced_core":
-            profiles[profile.profile_id] = _classify_balanced(metrics, qdii_reasons, profile)
+            profiles[profile.profile_id] = _classify_balanced(metrics, qdii_reasons, qdii_warnings, profile)
         elif profile.profile_id == "pre_retirement_preservation":
-            profiles[profile.profile_id] = _classify_preservation(metrics, qdii_fill_rate, profile)
+            profiles[profile.profile_id] = _classify_preservation(metrics, qdii_fill_rate, qdii_warnings, profile)
         else:
             profiles[profile.profile_id] = _classify_retirement(metrics, profile)
 

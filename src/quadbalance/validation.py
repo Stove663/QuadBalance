@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from quadbalance.benchmarks import BenchmarkResult
 from quadbalance.config import StrategyConfig
-from quadbalance.metrics import PerformanceMetrics
+from quadbalance.metrics import PerformanceMetrics, ProfileSuitability, classify_suitability
 from quadbalance.simulator import LifecycleResult
 from quadbalance.stress import StressResult
 
@@ -68,4 +68,15 @@ def evaluate_acceptance(
         "real_return": "thesis-broken" if metrics.worst_rolling_5y_real_return < -0.10 else ("review-required" if metrics.worst_rolling_3y_real_return < 0 else "normal"),
     }
 
-    return ValidationResult(config.config_id, len(failures) == 0, failures, metrics, comp, stress_results, boundary)
+    profile_results = classify_suitability(config, metrics, qdii_fill_rate=1.0, avg_qdii_weight_gap=0.0)
+    profile_payload: dict[str, dict[str, list[str] | str]] = {}
+    for profile_id, suit in profile_results.items():
+        profile_payload[profile_id] = {
+            "classification": suit.classification,
+            "reasons": suit.reasons,
+            "drivers": suit.drivers,
+            "warnings": suit.warnings,
+            "governance_notes": suit.governance_notes,
+        }
+
+    return ValidationResult(config.config_id, len(failures) == 0, failures, metrics, comp, stress_results, boundary, [], profile_payload)
