@@ -15,15 +15,8 @@ DcaMethod = Literal["proportional", "underweight"]
 
 SWEEP_BOND_VARIANTS: tuple[BondVariant, ...] = ("B1", "B2", "B3")
 SWEEP_DCA_METHODS: tuple[DcaMethod, ...] = ("proportional", "underweight")
-# Conservative shrink: keep one representative rebalance threshold to reduce sweep size.
-SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.05,)
-# Keep a compact but diverse allocation subset for routine sweeps.
-SWEEP_ALLOCATIONS: tuple[str, ...] = (
-    "25-25-25-25",
-    "20-30-25-25",
-    "30-20-25-25",
-    "40-20-20-20",
-)
+SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.03, 0.05)
+SWEEP_ALLOCATIONS: tuple[str, ...] = tuple(ALLOCATION_VARIANTS.keys())
 
 
 def generate_sweep_configs() -> list["StrategyConfig"]:

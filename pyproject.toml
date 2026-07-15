@@ -6,16 +6,17 @@ readme = "README.md"
 authors = [
     { name = "Stove663", email = "yinlu91@outlook.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "akshare>=1.18.64",
     "numpy>=2.4.6",
     "pandas>=3.0.3",
     "pyarrow>=24.0.0",
+    "pytest>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = []
 
 [project.scripts]
 quadbalance = "quadbalance.cli:main"

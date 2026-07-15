@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import sys
+import time
 
 import pandas as pd
 
@@ -165,26 +167,29 @@ def _fast_validate(config: StrategyConfig, metrics, benchmarks, stress: list[Str
     return evaluate_acceptance(config, metrics, benchmarks, stress)
 
 
-def _run_config(
-    config: StrategyConfig,
-    prices: pd.DataFrame,
-    backup_prices: dict[str, pd.Series],
-    benchmarks,
-    rf: float,
-    profiles: tuple[InvestorProfile, ...],
-    include_rebalance_premium: bool,
-    simulation_cache: dict[SimulationCacheKey, SimulationResult],
-) -> tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]:
-    baseline_key = _simulation_cache_key(config, True, "baseline")
-    if baseline_key not in simulation_cache:
-        simulation_cache[baseline_key] = simulate(prices, config, backup_prices=backup_prices)
-    result = simulation_cache[baseline_key]
+@dataclass(frozen=True)
+class _RunConfigPayload:
+    config: StrategyConfig
+    prices: pd.DataFrame
+    backup_prices: dict[str, pd.Series]
+    benchmarks: object
+    rf: float
+    profiles: tuple[InvestorProfile, ...]
+    include_rebalance_premium: bool
+
+
+def _run_config(payload: _RunConfigPayload) -> tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]:
+    config = payload.config
+    prices = payload.prices
+    backup_prices = payload.backup_prices
+    benchmarks = payload.benchmarks
+    rf = payload.rf
+    profiles = payload.profiles
+    include_rebalance_premium = payload.include_rebalance_premium
+    result = simulate(prices, config, backup_prices=backup_prices)
     no_rebal = None
     if include_rebalance_premium:
-        nr_key = _simulation_cache_key(config, False, "no_rebalance")
-        if nr_key not in simulation_cache:
-            simulation_cache[nr_key] = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
-        no_rebal = simulation_cache[nr_key]
+        no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
     metrics = compute_metrics(
         result,
         config,
@@ -248,14 +253,31 @@ def run_sweep(
 
     max_workers = min(8, max(1, len(configs)))
     shortlist_size = min(5, len(configs))
-    simulation_cache: dict[SimulationCacheKey, SimulationResult] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    total_configs = len(configs)
+    start_time = time.monotonic()
+    print(f"Running parameter sweep for {total_configs} configurations...", file=sys.stderr)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_run_config, config, prices, backup_prices, benchmarks, rf, profiles, False, simulation_cache): config
+            executor.submit(
+                _run_config,
+                _RunConfigPayload(config, prices, backup_prices, benchmarks, rf, profiles, False),
+            ): config
             for config in configs
         }
+        completed = 0
         for future in as_completed(futures):
             row, validation, config, result, s4_path, stress = future.result()
+            completed += 1
+            elapsed = max(time.monotonic() - start_time, 0.001)
+            progress = completed / total_configs if total_configs else 1.0
+            eta_seconds = int(round(elapsed / completed * (total_configs - completed))) if completed and completed < total_configs else 0
+            eta_text = f", ETA {eta_seconds // 60:02d}:{eta_seconds % 60:02d}" if completed < total_configs else ", done"
+            passed_marker = "pass" if validation.passed else "fail"
+            print(
+                f"[{completed:>3}/{total_configs}] {progress:>6.1%} {config.config_id} -> {passed_marker}{eta_text}",
+                file=sys.stderr,
+                flush=True,
+            )
             rows.append(row)
             staged_results.append((row, validation, config, result, s4_path, stress))
 

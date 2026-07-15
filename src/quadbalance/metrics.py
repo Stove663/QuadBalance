@@ -37,6 +37,7 @@ class PerformanceMetrics:
     rebalance_premium: float
     worst_year_return: float
     annual_returns: pd.Series
+    max_drawdown_recovery_days: int | None = None
     real_annualized_return: float = 0.0
     real_terminal_wealth: float = 0.0
     worst_rolling_1y_return: float = 0.0
@@ -81,6 +82,19 @@ def _longest_underwater_days(daily_values: pd.Series) -> int:
         else:
             current = 0
     return longest
+
+
+def _max_drawdown_recovery_days(daily_values: pd.Series) -> int | None:
+    cummax = daily_values.cummax()
+    drawdown = daily_values / cummax - 1
+    trough_idx = drawdown.idxmin()
+    peak_idx = daily_values.loc[:trough_idx].idxmax()
+    peak_value = float(daily_values.loc[peak_idx])
+    recovery = daily_values.loc[trough_idx:]
+    recovered = recovery[recovery >= peak_value]
+    if recovered.empty:
+        return None
+    return int((recovered.index[0] - peak_idx) / np.timedelta64(1, "D"))
 
 
 def compute_metrics(
@@ -129,6 +143,7 @@ def compute_metrics(
         max_drawdown=mdd,
         max_drawdown_peak=peak,
         max_drawdown_trough=trough,
+        max_drawdown_recovery_days=_max_drawdown_recovery_days(daily),
         sharpe_ratio=sharpe,
         positive_years_pct=positive_pct,
         rebalance_premium=rebalance_premium,

@@ -56,6 +56,25 @@ def format_lifecycle_summary(lifecycle_results: list[LifecycleResult]) -> str:
     return "\n".join(lines)
 
 
+def format_recovery_time_summary(validation: ValidationResult) -> str:
+    metrics = validation.metrics
+    recovery = metrics.max_drawdown_recovery_days
+    if recovery is None:
+        value = "Unrecovered within test window"
+    else:
+        value = f"{recovery} trading days"
+    lines = [
+        "## Recovery Time Summary",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Max drawdown recovery time | {value} |",
+        f"| Hard gate | {'Pass' if recovery is not None and recovery <= 252 else 'Fail'} |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def format_profile_suitability_summary(validation: ValidationResult) -> str:
     if not validation.profile_suitability:
         return ""

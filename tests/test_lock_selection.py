@@ -23,6 +23,7 @@ def _metrics(**kwargs) -> PerformanceMetrics:
         rebalance_premium=0.0,
         worst_year_return=-0.05,
         annual_returns=pd.Series(dtype=float),
+        max_drawdown_recovery_days=21,
     )
     defaults.update(kwargs)
     return PerformanceMetrics(**defaults)

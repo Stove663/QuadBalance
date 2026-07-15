@@ -38,7 +38,7 @@ class StressMode(str, Enum):
 
 S4_CUMULATIVE_FLOOR = -0.10
 FAST_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid in {"S1", "S2", "S3", "S6"}}
-FULL_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid not in FAST_STRESS_SCENARIOS}
+FULL_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid not in FAST_STRESS_SCENARIOS} | {"S5", "S7"}
 
 
 def _median_quadrant_returns(annual_q: pd.DataFrame) -> dict[str, float]:
@@ -125,7 +125,7 @@ def run_s4_path_test(
     worst_year = float(annual.min()) if len(annual) else 0.0
     span_years = len(years)
     window_ann = (1.0 + cumulative) ** (1.0 / span_years) - 1.0 if span_years else 0.0
-    passed = cumulative >= S4_CUMULATIVE_FLOOR
+    passed = bool(cumulative >= S4_CUMULATIVE_FLOOR)
 
     return S4PathResult(years, cumulative, worst_year, window_ann, passed)
 
