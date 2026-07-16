@@ -8,6 +8,7 @@ from quadbalance.benchmarks import BenchmarkResult
 from quadbalance.config import StrategyConfig
 from quadbalance.metrics import PerformanceMetrics, ProfileSuitability, classify_suitability
 from quadbalance.simulator import LifecycleResult
+from quadbalance.long_term_stress import LongTermScenarioResult
 from quadbalance.stress import StressResult
 
 MAX_NAV_RECOVERY_DAYS = 252
@@ -23,6 +24,7 @@ class ValidationResult:
     stress_results: list[StressResult]
     boundary_classifications: dict[str, str] = field(default_factory=dict)
     lifecycle_results: list[LifecycleResult] = field(default_factory=list)
+    long_term_results: list[LongTermScenarioResult] = field(default_factory=list)
     profile_suitability: dict[str, dict[str, list[str] | str]] = field(default_factory=dict)
 
 

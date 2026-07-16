@@ -17,6 +17,7 @@ from quadbalance.data import load_backup_prices, load_price_matrix_with_meta
 from quadbalance.metrics import cash_risk_free_rate, classify_suitability, compute_metrics
 from quadbalance.profile_thresholds import InvestorProfile, load_profile_thresholds
 from quadbalance.proxy_sensitivity import run_sensitivity, write_sensitivity_outputs
+from quadbalance.long_term_stress import SCENARIOS as LONG_TERM_SCENARIOS, run_long_term_scenario
 from quadbalance.reporting import generate_lock_document
 from quadbalance.simulator import LifecycleResult, SimulationResult, simulate, simulate_lifecycle
 from quadbalance.stress import S4PathResult, StressMode, StressResult, run_fast_stress_tests, run_full_stress_tests
@@ -346,6 +347,8 @@ def run_sweep(
             investor_profiles=profiles,
             intended_profile=intended_profile,
         )
+        long_term_results = [run_long_term_scenario(prices, first_pass_config, scenario) for scenario in LONG_TERM_SCENARIOS]
+        first_pass.long_term_results = long_term_results
         write_run_artifacts(
             output_dir,
             first_pass_config,

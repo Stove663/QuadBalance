@@ -17,6 +17,7 @@ from quadbalance.reporting_sections import (
     format_boundary_summary,
     format_lifecycle_summary,
     format_lock_selection_notes,
+    format_long_term_stress_markdown,
     format_profile_suitability_summary,
     format_profile_thresholds_summary,
     format_rebalance_execution_markdown,
@@ -135,6 +136,27 @@ def generate_lock_document(
         "",
     ])
     lines.append(format_stress_summary_markdown(validation.stress_results))
+    long_term_results = getattr(validation, "long_term_results", [])
+    if long_term_results:
+        worst_classification = "thesis-broken" if any(r.classification == "thesis-broken" for r in long_term_results) else (
+            "review-required" if any(r.classification == "review-required" for r in long_term_results) else "normal"
+        )
+        lt3 = next((r for r in long_term_results if r.scenario_id == "LT3"), None)
+        lines.extend([
+            "## Long-Term Macro Regime Interpretation",
+            "",
+            "- LT1 emphasizes inflation persistence and weak real bond/cash protection.",
+            "- LT2 emphasizes deflationary stagnation where nominal returns can look acceptable while real growth stays weak.",
+            "- LT3 emphasizes a Japan-style balance-sheet recession with prolonged low growth, weaker domestic risk assets, and persistent QDII drag from quota/currency frictions.",
+            "- In this framework, overseas assets are not automatically a hedge: they can buffer domestic stagnation, but they can also underperform when currency, quota, and valuation headwinds persist.",
+            f"- Overall long-term regime verdict: {worst_classification}.",
+        ])
+        if lt3 is not None:
+            lines.append(
+                f"- LT3-specific note: 4% withdrawal {'depletes' if lt3.withdrawal_4pct_depleted else 'does not deplete'} under this synthetic regime; real annualized return {lt3.real_annualized_return:.2%}, 10y real return floor {lt3.worst_rolling_10y_real_return:.2%}."
+            )
+        lines.append("")
+        lines.append(format_long_term_stress_markdown(long_term_results))
     lines.extend(["", format_pool_markdown(), "## Disclaimer", "", DISCLAIMER, ""])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines), encoding="utf-8")

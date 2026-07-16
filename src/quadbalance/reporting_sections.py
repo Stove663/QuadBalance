@@ -5,6 +5,7 @@ from __future__ import annotations
 from quadbalance.profile_thresholds import InvestorProfile
 from quadbalance.simulator import LifecycleResult, SimulationResult
 from quadbalance.stress import S4PathResult, StressResult
+from quadbalance.long_term_stress import LongTermScenarioResult
 from quadbalance.validation import ValidationResult
 
 
@@ -128,6 +129,19 @@ def format_stress_summary_markdown(stress_results: list[StressResult]) -> str:
     lines = ["## Stress Test Summary", "", "| ID | Scenario | Portfolio Return | Passed |", "|----|----------|------------------|--------|"]
     for sr in stress_results:
         lines.append(f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | {'✓' if sr.passed else '✗'} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_long_term_stress_markdown(results: list[LongTermScenarioResult]) -> str:
+    if not results:
+        return ""
+    lines = ["## Long-Term Macro Regime Stress", "", "| ID | Scenario | Horizon | Nominal Ann. | Real Ann. | Max Drawdown | Underwater Days | 5y Real | 10y Real | Purchasing Power | 4% Withdrawal | Classification | Reasons |", "|----|----------|---------|--------------|-----------|--------------|-----------------|---------|---------|------------------|--------------|----------------|---------|"]
+    for r in results:
+        reasons = "; ".join(r.threshold_reasons) or "—"
+        lines.append(
+            f"| {r.scenario_id} | {r.scenario_name} | {r.horizon_years}y | {r.nominal_annualized_return:.2%} | {r.real_annualized_return:.2%} | {r.max_drawdown:.2%} | {r.longest_underwater_days} | {r.worst_rolling_5y_real_return:.2%} | {r.worst_rolling_10y_real_return:.2%} | {'✓' if r.purchasing_power_preserved else '✗'} | {'✗' if r.withdrawal_4pct_depleted else '✓'} | {r.classification} | {reasons} |"
+        )
     lines.append("")
     return "\n".join(lines)
 
