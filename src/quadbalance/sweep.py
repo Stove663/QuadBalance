@@ -251,7 +251,7 @@ def collect_required_symbols(configs: list[StrategyConfig]) -> list[str]:
     return sorted(symbols)
 
 
-def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk) -> dict[str, Any]:
+def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, validation_stage: str) -> dict[str, Any]:
     qdii = sim_result.qdii_metrics
     return {
         "config_id": config.config_id,
@@ -296,6 +296,7 @@ def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, st
         "avg_qdii_weight_gap": getattr(qdii, "avg_qdii_weight_gap", None),
         "qdii_friction_months": getattr(qdii, "qdii_friction_months", 0),
         "qdii_recovery_months": getattr(qdii, "qdii_recovery_months", 0),
+        "validation_stage": validation_stage,
         "validation_passed": validation.passed,
         "failure_reasons": "; ".join(validation.failure_reasons),
         "boundary_macro": validation.boundary_classifications.get("macro", ""),
@@ -333,7 +334,8 @@ def _run_one_config(
     benchmarks,
     risk_free_annual: float,
     profile_thresholds_path: Path | None,
-) -> tuple[dict[str, Any], ValidationResult, StrategyConfig, SimulationResult] | None:
+    screening_only: bool = False,
+) -> tuple[dict[str, Any], ValidationResult, StrategyConfig, SimulationResult, bool] | None:
     print(
         f"[{idx}/{total_configs}] Running {config.config_id} | "
         f"alloc={config.allocation_name} bond={config.bond_variant} "
@@ -341,6 +343,28 @@ def _run_one_config(
     )
     sim_result = simulate(prices, config, backup_prices=backup_prices)
     metrics = compute_metrics(sim_result, config, prices, risk_free_annual=risk_free_annual, inflation_annual=0.03)
+    validation = ValidationResult(
+        config_id=config.config_id,
+        passed=True,
+        failure_reasons=[],
+        metrics=metrics,
+        benchmark_comparison=benchmark_comparison(metrics, benchmarks),
+        stress_results=[],
+    )
+    validation.profile_suitability = _build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
+    screening_failures: list[str] = []
+    if metrics.real_annualized_return < 0:
+        screening_failures.append("negative real annualized return")
+    if metrics.max_drawdown < -0.25:
+        screening_failures.append("max drawdown beyond threshold")
+    if metrics.real_terminal_wealth < 0.8:
+        screening_failures.append("real terminal wealth below threshold")
+    if screening_failures:
+        validation.passed = False
+        validation.failure_reasons = screening_failures
+        row = _build_sweep_row(config, sim_result, metrics, validation, [], [], [], [], None, "screened-out")
+        return row, validation, config, sim_result, True
+
     stress_results, _ = run_stress_tests(config, sim_result, prices, backup_prices=backup_prices)
     path_results = run_path_stress_tests(config, prices, backup_prices=backup_prices)
     behavior_results = run_behavior_stress_tests(sim_result, metrics)
@@ -357,12 +381,12 @@ def _run_one_config(
         cross_border_stress_results=cross_border_results,
         product_risk=product_risk,
     )
-    validation.long_term_results = run_long_term_stress_tests(config, prices)
+    validation.long_term_results = [] if screening_only else run_long_term_stress_tests(config, prices)
     validation.benchmark_comparison = benchmark_comparison(metrics, benchmarks)
     validation.profile_suitability = _build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
 
-    row = _build_sweep_row(config, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk)
-    return row, validation, config, sim_result
+    row = _build_sweep_row(config, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, "deep-validated")
+    return row, validation, config, sim_result, False
 
 
 def _run_one_config_payload(payload: tuple[int, int, StrategyConfig, pd.DataFrame, dict[str, pd.Series], Any, float, Path | None]):
@@ -377,13 +401,13 @@ def run_sweep(
     profile_thresholds_path: Path | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
+    configs = generate_sweep_configs()
     required_symbols = collect_required_symbols(configs)
     required_backup_symbols = sorted(set(QDII_BACKUP_SYMBOLS) | {sym for config in configs for sym in config.simulation_symbols() if config.is_qdii_symbol(sym)})
     prices, backup_prices, _ = load_market_data(symbols=required_symbols, backup_symbols=tuple(required_backup_symbols), use_cache=use_cache)
 
     benchmarks = run_benchmarks(prices)
     risk_free_annual = cash_risk_free_rate(prices)
-    configs = generate_sweep_configs()
 
     rows: list[dict[str, Any]] = []
     best_bundle: dict[str, Any] | None = None
@@ -400,7 +424,7 @@ def run_sweep(
             result = future.result()
             if result is None:
                 continue
-            row, validation, config, sim_result = result
+            row, validation, config, sim_result, screened_out = result
             rows.append(row)
             if validation.passed:
                 bundle = {"validation": validation, "config": config, "sim_result": sim_result}
