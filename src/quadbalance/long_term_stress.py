@@ -327,8 +327,8 @@ def _path_metrics(daily_values: pd.Series, inflation_annual: float) -> tuple[flo
     recovered = recovery[recovery >= real.loc[peak]]
     recovery_days = int((recovered.index[0] - peak).days) if not recovered.empty else None
     longest_real_underwater = int((real < real_peak).astype(int).groupby((real >= real_peak).astype(int).cumsum()).sum().max()) if len(real) else 0
-    monthly = daily_values.resample("M").last().pct_change().dropna()
-    quarterly = daily_values.resample("Q").last().pct_change().dropna()
+    monthly = daily_values.resample("ME").last().pct_change().dropna()
+    quarterly = daily_values.resample("QE").last().pct_change().dropna()
     worst_1m = float(monthly.min()) if len(monthly) else 0.0
     worst_q = float(quarterly.min()) if len(quarterly) else 0.0
     false_recoveries = int(((daily_values < daily_values.cummax()) & (daily_values.shift(1) >= daily_values.shift(1).cummax())).sum()) if len(daily_values) else 0
@@ -357,10 +357,10 @@ def classify_long_term(metrics) -> tuple[str, list[str]]:
 
 
 def _scenario_phase_metrics(prices: pd.DataFrame, config: StrategyConfig, phase: LongTermPhase) -> tuple[float, float, float, float, int, float, pd.Series]:
-    synthetic = prices.copy()
     total_days = phase.years * 252
     growth = np.arange(total_days, dtype=float) / 252.0
-    for col in synthetic.columns:
+    synthetic = pd.DataFrame(index=pd.bdate_range(prices.index[0], periods=total_days))
+    for col in prices.columns:
         if col.lower().startswith("bond"):
             r = phase.bonds_return
         elif col.lower().startswith("gold"):
@@ -371,7 +371,7 @@ def _scenario_phase_metrics(prices: pd.DataFrame, config: StrategyConfig, phase:
             r = phase.stocks_return
             if "qdii" in col.lower():
                 r += phase.qdii_return_drag - phase.currency_drag
-        synthetic[col] = synthetic[col].iloc[0] * (1 + r) ** growth
+        synthetic[col] = float(prices[col].iloc[0]) * (1 + r) ** growth
     sim = simulate(synthetic, config)
     metrics = compute_metrics(sim, config, synthetic, risk_free_annual=0.0, inflation_annual=phase.cpi)
     return (
@@ -418,8 +418,8 @@ def run_long_term_scenario(prices: pd.DataFrame, config: StrategyConfig, scenari
     real_recovery_days = int((real_recovered.index[0] - real_peak_idx).days) if not real_recovered.empty else None
     real_longest_underwater_days = int((real_daily < real_peak).astype(int).groupby((real_daily >= real_peak).astype(int).cumsum()).sum().max()) if len(real_daily) else 0
     real_max_drawdown = float(real_dd.min())
-    worst_1m = float(sim.daily_values.resample("M").last().pct_change().dropna().min()) if len(sim.daily_values) else 0.0
-    worst_q = float(sim.daily_values.resample("Q").last().pct_change().dropna().min()) if len(sim.daily_values) else 0.0
+    worst_1m = float(sim.daily_values.resample("ME").last().pct_change().dropna().min()) if len(sim.daily_values) else 0.0
+    worst_q = float(sim.daily_values.resample("QE").last().pct_change().dropna().min()) if len(sim.daily_values) else 0.0
     false_recoveries = int(((sim.daily_values < sim.daily_values.cummax()) & (sim.daily_values.shift(1) >= sim.daily_values.shift(1).cummax())).sum()) if len(sim.daily_values) else 0
 
     withdrawal_4pct = simulate_lifecycle(synthetic, config, "withdrawal_4pct_long_term", withdrawal_rate=0.04, withdrawal_mode="annual")
@@ -429,7 +429,17 @@ def run_long_term_scenario(prices: pd.DataFrame, config: StrategyConfig, scenari
         ("seq_lumpy", simulate_lifecycle(synthetic, config, "one_time_liquidity_20pct", withdrawal_rate=0.0, withdrawal_mode="annual")),
         ("seq_interrupt", simulate_lifecycle(synthetic, config, "contribution_interrupt", withdrawal_rate=0.0, interrupt_months=24, withdrawal_mode="annual")),
     ]
-    classification, reasons = classify_long_term(type("M", (), {**metrics.__dict__, "real_max_drawdown": real_max_drawdown, "real_longest_underwater_days": real_longest_underwater_days})())
+    long_term_metrics = type(
+        "M",
+        (),
+        {
+            **metrics.__dict__,
+            "real_max_drawdown": real_max_drawdown,
+            "real_longest_underwater_days": real_longest_underwater_days,
+            "worst_rolling_10y_real_return": _worst_rolling_10y_real_return(sim.daily_values, inflation),
+        },
+    )()
+    classification, reasons = classify_long_term(long_term_metrics)
     reasons.extend(phase_reasons)
     sequence_risk_results: list[dict[str, object]] = []
     for sid, result in sequence_profiles:

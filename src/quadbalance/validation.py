@@ -6,15 +6,14 @@ from dataclasses import dataclass, field
 
 from quadbalance.benchmarks import BenchmarkResult
 from quadbalance.config import StrategyConfig
-from quadbalance.cross_border_stress import CrossBorderStressResult
-from quadbalance.metrics import PerformanceMetrics, ProfileSuitability, classify_suitability
-from quadbalance.simulator import LifecycleResult
 from quadbalance.behavior_stress import BehaviorStressResult
+from quadbalance.cross_border_stress import CrossBorderStressResult, run_cross_border_stress_tests
 from quadbalance.long_term_stress import LongTermScenarioResult
+from quadbalance.metrics import PerformanceMetrics, ProfileSuitability, classify_suitability
 from quadbalance.path_stress import PathStressResult
 from quadbalance.product_risk import ProductRiskSummary
+from quadbalance.simulator import LifecycleResult
 from quadbalance.stress import StressResult
-from quadbalance.sweep import RobustnessSweepResult
 
 MAX_NAV_RECOVERY_DAYS = 252
 
@@ -31,7 +30,7 @@ class ValidationResult:
     lifecycle_results: list[LifecycleResult] = field(default_factory=list)
     long_term_results: list[LongTermScenarioResult] = field(default_factory=list)
     profile_suitability: dict[str, dict[str, list[str] | str]] = field(default_factory=dict)
-    robustness: RobustnessSweepResult | None = None
+    robustness: object | None = None
     path_stress_results: list[PathStressResult] = field(default_factory=list)
     behavior_stress_results: list[BehaviorStressResult] = field(default_factory=list)
     cross_border_stress_results: list[CrossBorderStressResult] = field(default_factory=list)
@@ -74,7 +73,8 @@ def evaluate_acceptance(
 
     path_stress_results = path_stress_results or []
     behavior_stress_results = behavior_stress_results or []
-    cross_border_stress_results = cross_border_stress_results or []
+    if cross_border_stress_results is None:
+        cross_border_stress_results = run_cross_border_stress_tests(config)
     for pr in path_stress_results:
         if pr.classification == "thesis-broken":
             failures.append(f"Criterion 3: path stress {pr.scenario_id} failed")

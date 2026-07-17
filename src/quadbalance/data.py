@@ -15,6 +15,7 @@ from quadbalance.instrument_catalog import BACKTEST_PROXIES, INSTRUMENT_NAMES, B
 CACHE_DIR = Path(".cache")
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+_SERIES_MEMORY_CACHE: dict[str, pd.Series] = {}
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,9 @@ def fetch_otc_fund_nav(symbol: str, use_cache: bool = True) -> pd.Series:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
     if raw is None or raw.empty:
+        if use_cache and cache.exists():
+            df = pd.read_parquet(cache)
+            return df["close"]
         raise RuntimeError(f"Failed to fetch OTC fund {symbol}") from last_error
 
     df = raw.rename(columns={"净值日期": "date", "单位净值": "close"})
@@ -88,6 +92,9 @@ def fetch_etf_prices(symbol: str, use_cache: bool = True) -> pd.Series:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
     if raw is None:
+        if use_cache and cache.exists():
+            df = pd.read_parquet(cache)
+            return df["close"]
         raise RuntimeError(f"Failed to fetch ETF {symbol}") from last_error
 
     df = raw.copy()
@@ -153,14 +160,34 @@ def load_backtest_prices(
     use_cache: bool = True,
 ) -> tuple[pd.Series, BacktestProxyUsage | None]:
     """Load prices for backtest, stitching a longer-history proxy when configured."""
+    if symbol in _SERIES_MEMORY_CACHE:
+        cached = _SERIES_MEMORY_CACHE[symbol]
+        proxy_cfg = BACKTEST_PROXIES.get(symbol)
+        if proxy_cfg is None:
+            return cached, None
+        proxy = _SERIES_MEMORY_CACHE.get(proxy_cfg.code)
+        if proxy is not None:
+            stitched, usage = stitch_with_proxy(cached, proxy)
+            if usage is not None:
+                usage = BacktestProxyUsage(
+                    primary=symbol,
+                    proxy=proxy_cfg.code,
+                    proxy_start=usage.proxy_start,
+                    handoff=usage.handoff,
+                )
+            return stitched, usage
+        return cached, None
+
     primary = fetch_prices(symbol, use_cache=use_cache)
     primary.name = symbol
+    _SERIES_MEMORY_CACHE[symbol] = primary
     proxy_cfg = BACKTEST_PROXIES.get(symbol)
     if proxy_cfg is None:
         return primary, None
 
     proxy = _fetch_proxy_prices(proxy_cfg, use_cache=use_cache)
     proxy.name = proxy_cfg.code
+    _SERIES_MEMORY_CACHE[proxy_cfg.code] = proxy
     stitched, usage = stitch_with_proxy(primary, proxy)
     if usage is not None:
         usage = BacktestProxyUsage(
@@ -265,6 +292,18 @@ def load_price_matrix(
     """Load aligned close/NAV prices for all symbols."""
     prices, _ = load_price_matrix_with_meta(symbols=symbols, start=start, use_cache=use_cache)
     return prices
+
+
+def load_market_data(
+    symbols: list[str] | None = None,
+    backup_symbols: tuple[str, ...] | None = None,
+    start: str = PRIMARY_START,
+    use_cache: bool = True,
+) -> tuple[pd.DataFrame, dict[str, pd.Series], PriceMatrixMeta]:
+    """Load main and backup data in one pass, sharing the in-memory cache."""
+    prices, meta = load_price_matrix_with_meta(symbols=symbols, start=start, use_cache=use_cache)
+    backups = load_backup_prices(symbols=backup_symbols, use_cache=use_cache)
+    return prices, backups, meta
 
 
 def load_price_matrix_with_meta(

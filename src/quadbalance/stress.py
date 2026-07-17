@@ -47,7 +47,7 @@ class StressMode(str, Enum):
 
 S4_CUMULATIVE_FLOOR = -0.10
 FAST_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid in {"S1", "S2", "S3", "S6"}}
-MECHANISM_STRESS_SCENARIOS = {"S14", "S15", "S16", "S17", "S18", "S19", "S20", "S21"}
+MECHANISM_STRESS_SCENARIOS = {"S14", "S15", "S16", "S17", "S18", "S19", "S20", "S21", "S22", "S23", "S24", "S25", "S26", "S27"}
 FULL_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid not in FAST_STRESS_SCENARIOS} | {"S5", "S7"}
 
 MECHANISM_STRESS_NOTES: dict[str, list[str]] = {

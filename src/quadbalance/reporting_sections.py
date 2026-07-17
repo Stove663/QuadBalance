@@ -192,6 +192,35 @@ def format_risk_summary_page(validation: ValidationResult) -> str:
     return "\n".join(lines)
 
 
+def format_uncovered_risk_summary(validation: ValidationResult) -> str:
+    metrics = validation.metrics
+    path = getattr(validation, "path_stress_results", [])
+    behavior = getattr(validation, "behavior_stress_results", [])
+    cross_border = getattr(validation, "cross_border_stress_results", [])
+    product = getattr(validation, "product_risk", None)
+    items: list[str] = []
+    if metrics.max_drawdown <= -0.20:
+        items.append("深回撤与恢复期压力")
+    if metrics.worst_rolling_5y_real_return < 0:
+        items.append("真实购买力侵蚀")
+    if any(r.classification != "normal" for r in path):
+        items.append("路径依赖与再平衡失效")
+    if any(r.triggered for r in behavior):
+        items.append("行为纪律与执行风险")
+    if any(r.classification != "normal" for r in cross_border):
+        items.append("跨境访问与结算约束")
+    if product is not None and product.weighted_score >= 40:
+        items.append("产品级实现脆弱性")
+
+    lines = ["## Uncovered Risk Summary", ""]
+    if items:
+        lines.extend([f"- {item}" for item in items])
+    else:
+        lines.append("- 当前未见新增未覆盖风险")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_lock_selection_notes(intended_profile: str | None) -> str:
     lines = [
         "## Lock Selection Ranking",

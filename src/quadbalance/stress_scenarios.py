@@ -24,4 +24,10 @@ STRESS_SCENARIOS: dict[str, tuple[str, dict[str, float]]] = {
     "S19": ("Bond fund redemption spiral", {"stocks": -0.10, "bonds": -0.14, "gold": -0.03, "cash": -0.01}),
     "S20": ("Cash liquidity and inflation erosion", {"stocks": -0.08, "bonds": -0.04, "gold": 0.0, "cash": -0.06}),
     "S21": ("Behavioral capitulation", {"stocks": -0.32, "bonds": -0.07, "gold": -0.10, "cash": 0.0}),
+    "S22": ("Correlation convergence", {"stocks": -0.16, "bonds": -0.09, "gold": -0.05, "cash": -0.01}),
+    "S23": ("Defensive-asset co-crash", {"stocks": -0.20, "bonds": -0.08, "gold": -0.06, "cash": -0.01}),
+    "S24": ("Recovery-friction prolongation", {"stocks": -0.14, "bonds": -0.04, "gold": -0.03, "cash": -0.01}),
+    "S25": ("QDII routing delay", {"stocks": -0.12, "bonds": 0.00, "gold": 0.00, "cash": 0.00}),
+    "S26": ("FX plus quota squeeze", {"stocks": -0.18, "bonds": 0.00, "gold": -0.03, "cash": 0.00}),
+    "S27": ("Rebalance under cross-border stress", {"stocks": -0.10, "bonds": -0.03, "gold": 0.00, "cash": 0.00}),
 }

@@ -24,11 +24,13 @@ from quadbalance.reporting_sections import (
     format_product_risk_markdown,
     format_profile_suitability_summary,
     format_risk_overview_panel,
+    format_risk_summary_page,
     format_profile_thresholds_summary,
     format_rebalance_execution_markdown,
     format_risk_map_markdown,
     format_robustness_summary_markdown,
     format_stress_summary_markdown,
+    format_uncovered_risk_summary,
 )
 from quadbalance.simulator import SimulationResult
 from quadbalance.reporting_sections import format_s4_path_markdown
@@ -157,6 +159,7 @@ def generate_lock_document(
     lines.append(format_product_risk_markdown(getattr(validation, "product_risk", None)))
     lines.append(format_robustness_summary_markdown(getattr(validation, "robustness", None)))
     lines.append(format_risk_map_markdown(validation))
+    lines.append(format_uncovered_risk_summary(validation))
     long_term_results = getattr(validation, "long_term_results", [])
     if long_term_results:
         worst_classification = "thesis-broken" if any(r.classification == "thesis-broken" for r in long_term_results) else (

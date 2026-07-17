@@ -10,6 +10,7 @@ from quadbalance.reporting_sections import (
     format_profile_suitability_summary,
     format_rebalance_execution_markdown,
     format_stress_summary_markdown,
+    format_uncovered_risk_summary,
 )
 from quadbalance.simulator import LifecycleResult, RebalanceExecutionMetrics, SimulationResult
 from quadbalance.stress import StressResult
@@ -30,6 +31,18 @@ def _metrics() -> PerformanceMetrics:
         worst_year_return=-0.05,
         annual_returns=pd.Series(dtype=float),
         max_drawdown_recovery_days=21,
+        real_annualized_return=0.08,
+        real_terminal_wealth=100.0,
+        worst_rolling_3y_real_return=0.02,
+        worst_rolling_5y_real_return=0.02,
+        longest_underwater_days=50,
+        average_drawdown=-0.03,
+        ulcer_index=0.04,
+        pain_index=0.02,
+        cdar_95=-0.08,
+        drawdown_10pct_events=1,
+        drawdown_15pct_events=0,
+        drawdown_20pct_events=0,
     )
 
 
@@ -99,3 +112,51 @@ def test_format_stress_summary_markdown_renders_table():
     ])
     assert "Crash" in text
     assert "Recovery" in text
+
+
+def test_format_uncovered_risk_summary_lists_key_themes():
+    validation = ValidationResult(
+        config_id="cfg",
+        passed=True,
+        failure_reasons=[],
+        metrics=PerformanceMetrics(
+            annualized_return=0.1,
+            annualized_volatility=0.2,
+            max_drawdown=-0.24,
+            max_drawdown_peak="2020-01-01",
+            max_drawdown_trough="2020-02-01",
+            sharpe_ratio=0.5,
+            positive_years_pct=1.0,
+            rebalance_premium=0.01,
+            worst_year_return=-0.05,
+            annual_returns=pd.Series(dtype=float),
+            max_drawdown_recovery_days=21,
+            real_annualized_return=0.08,
+            real_terminal_wealth=100.0,
+            worst_rolling_3y_real_return=0.02,
+            worst_rolling_5y_real_return=-0.03,
+            longest_underwater_days=400,
+            average_drawdown=-0.03,
+            ulcer_index=0.04,
+            pain_index=0.02,
+            cdar_95=-0.08,
+            drawdown_10pct_events=1,
+            drawdown_15pct_events=0,
+            drawdown_20pct_events=0,
+        ),
+        benchmark_comparison={},
+        stress_results=[StressResult("S13", "Persistent correlation/liquidity stress", -0.2, 0.2, False)],
+        boundary_classifications={},
+        lifecycle_results=[],
+        long_term_results=[],
+        profile_suitability={},
+        robustness=None,
+        path_stress_results=[type("P", (), {"classification": "review-required"})()],
+        behavior_stress_results=[type("B", (), {"triggered": True})()],
+        cross_border_stress_results=[type("C", (), {"classification": "review-required"})()],
+        product_risk=None,
+    )
+    text = format_uncovered_risk_summary(validation)
+    assert "深回撤" in text
+    assert "真实购买力" in text
+    assert "路径依赖" in text
