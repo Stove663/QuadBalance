@@ -1,11 +1,12 @@
 # long-term-macro-regime-stress Specification
 
 ## Purpose
-TBD - created by archiving change add-long-term-balance-sheet-recession-stress. Update Purpose after archive.
-## Requirements
-### Requirement: Long-term macro regime scenario catalog
+Define deterministic long-term macro regime stress scenarios and the required reporting fields for locked strategies.
 
-The validation suite SHALL define deterministic long-term macro regime stress scenarios that model multi-year environments where historical growth, rate, and mean-reversion assumptions may fail.
+## Requirements
+### Requirement: Long-term scenario catalog
+
+The validation suite SHALL define three deterministic long-term macro regime scenarios that model multi-year environments where historical growth, rate, inflation, and mean-reversion assumptions may fail.
 
 The scenario catalog MUST include at minimum:
 
@@ -15,7 +16,7 @@ The scenario catalog MUST include at minimum:
 | LT2 | Deflationary stagnation | 20 years | weak equities, low/negative CPI, near-zero cash yield, low bond yield after initial support, muted gold return |
 | LT3 | Balance-sheet recession / Japanification | 30 years | compressed domestic equity returns, persistent low rates, private-sector deleveraging proxy, low/negative CPI phases, weak risk appetite, limited mean reversion |
 
-Each scenario MUST document annual assumptions for Stocks, Bonds, Gold, Cash, CPI, and any QDII/currency friction used by the model.
+Each scenario MUST document annual assumptions for Stocks, Bonds, Gold, Cash, CPI, and any QDII or currency friction used by the model.
 
 #### Scenario: Scenario catalog is available
 
@@ -50,20 +51,20 @@ The synthetic path builder MUST preserve the selected strategy configuration, DC
 
 ### Requirement: Long-term real-return metrics
 
-For each long-term macro regime scenario, the validation suite SHALL compute nominal, real, drawdown, underwater, rolling-window, and purchasing-power preservation metrics.
+For each long-term macro regime scenario, the validation suite SHALL compute nominal, real, drawdown, underwater, rolling-window, purchasing-power preservation, and withdrawal-risk metrics.
 
 The metrics MUST include at minimum:
 
 1. Nominal cumulative return.
 2. Nominal annualized return.
-3. CPI-adjusted cumulative return.
-4. CPI-adjusted annualized return.
-5. Real terminal wealth relative to initial wealth.
-6. Maximum drawdown.
-7. Longest underwater duration.
-8. Worst rolling 5-year and 10-year real returns when the horizon is long enough.
+3. Real cumulative return or real terminal wealth relative to initial wealth.
+4. Real annualized return.
+5. Maximum drawdown.
+6. Longest underwater duration.
+7. Worst rolling 5-year real return.
+8. Worst rolling 10-year real return.
 9. Whether purchasing power is preserved over the full horizon.
-10. Whether withdrawal/depletion risk is triggered when a withdrawal test is enabled.
+10. Whether a 4% withdrawal path depletes.
 
 #### Scenario: LT2 real-return metrics are computed
 
@@ -83,8 +84,8 @@ The validation suite SHALL classify each long-term macro regime result as `norma
 
 Default classifications MUST follow these rules unless explicitly overridden by future profile thresholds:
 
-1. `normal` when full-horizon real terminal wealth is at or above initial real wealth, real annualized return is non-negative, longest underwater duration does not exceed 5 years, and no enabled withdrawal test depletes.
-2. `review-required` when real terminal wealth is below initial real wealth, real annualized return is negative, longest underwater duration exceeds 5 years, or withdrawal safety is impaired without depletion.
+1. `normal` when real annualized return is non-negative, real terminal wealth is at or above initial real wealth, longest underwater duration does not exceed 5 years, and no enabled withdrawal test depletes.
+2. `review-required` when real annualized return is negative, real terminal wealth is below initial real wealth, or longest underwater duration exceeds 5 years without meeting thesis-broken thresholds.
 3. `thesis-broken` when real terminal wealth loss exceeds 20%, longest underwater duration exceeds 10 years, worst rolling 10-year real return is below -10%, or a 4% real withdrawal path depletes.
 
 #### Scenario: Review-required long-term result
@@ -98,4 +99,20 @@ Default classifications MUST follow these rules unless explicitly overridden by 
 - **WHEN** LT3 has real terminal wealth loss greater than 20%
 - **THEN** LT3 is classified as `thesis-broken`
 - **AND** the strategy lock document requires re-validation before relying on the allocation for that regime
+
+### Requirement: Long-term stress reporting in strategy lock
+
+When long-term scenario results are available, the strategy lock document SHALL include a Long-Term Macro Regime Stress section listing each scenario's ID, name, horizon, nominal annualized return, real annualized return, maximum drawdown, longest underwater duration, purchasing-power preservation status, governance classification, and key threshold reasons.
+
+#### Scenario: Strategy lock includes long-term summary
+
+- **WHEN** LT1-LT3 complete for the locked configuration
+- **THEN** strategy-lock.md includes a Long-Term Macro Regime Stress section
+- **AND** each scenario row shows real-return, drawdown, underwater, purchasing-power, withdrawal, and governance classification fields
+
+#### Scenario: Thesis-broken long-term regime is highlighted
+
+- **WHEN** any long-term scenario is classified as `thesis-broken`
+- **THEN** the strategy boundary summary includes the long-term regime classification
+- **AND** the governance policy states that allocation redesign requires a new validation run rather than automatic parameter chasing
 

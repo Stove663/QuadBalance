@@ -1,10 +1,12 @@
 # nav-recovery-time-metric Specification
 
 ## Purpose
-TBD - created by archiving change nav-recovery-time-hard-threshold. Update Purpose after archive.
+Define the NAV recovery-time metric used in strategy summaries and lock documents.
 ## Requirements
 ### Requirement: NAV recovery time metric
 The system SHALL compute the number of trading days required for the portfolio NAV to recover to the peak that preceded the maximum drawdown.
+
+If the portfolio does not recover within the test window, the metric SHALL be reported as unrecovered rather than assigned a synthetic duration.
 
 #### Scenario: recovered path reports a finite recovery time
 - **WHEN** a portfolio NAV reaches a new peak, falls into the maximum drawdown, and later returns to at least the pre-drawdown peak

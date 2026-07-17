@@ -44,6 +44,17 @@ def test_exploratory_s5_s7_returns_approximate_modes():
     scenario_ids = {r.scenario_id for r in results}
     assert "S5" in scenario_ids
     assert "S7" in scenario_ids
+    assert "S13" in scenario_ids
+
+
+def test_s13_persistent_stress_includes_liquidity_notes():
+    config = _config()
+    sim = _simulation_result()
+    result = [r for r in run_full_stress_tests(config, sim, pd.DataFrame({"003358": [1.0], "000216": [1.0], "006874": [1.0]}, index=pd.bdate_range("2020-01-02", periods=1)), include_s4=False)[0] if r.scenario_id == "S13"][0]
+    assert result.duration_days > 0
+    assert result.liquidity_impairment_days > 0
+    assert result.concurrent_drawdown_count >= 1
+    assert result.notes
 
 
 def test_s4_window_mode_returns_result():

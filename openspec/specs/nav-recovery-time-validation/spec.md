@@ -1,7 +1,8 @@
 # nav-recovery-time-validation Specification
 
 ## Purpose
-TBD - created by archiving change nav-recovery-time-hard-threshold. Update Purpose after archive.
+Define the hard validation gate for NAV recovery time using the configured maximum recovery duration.
+
 ## Requirements
 ### Requirement: hard recovery-time gate
 The system SHALL reject a strategy when its NAV recovery time exceeds the configured maximum recovery duration.

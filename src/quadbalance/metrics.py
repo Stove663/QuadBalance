@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -23,6 +23,8 @@ class ProfileSuitability:
     governance_notes: list[str]
     qdii_friction_months: int = 0
     qdii_recovery_months: int = 0
+    sequence_risk_classification: str = "normal"
+    sequence_risk_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -47,6 +49,13 @@ class PerformanceMetrics:
     worst_rolling_3y_real_return: float = 0.0
     worst_rolling_5y_real_return: float = 0.0
     longest_underwater_days: int = 0
+    average_drawdown: float = 0.0
+    ulcer_index: float = 0.0
+    pain_index: float = 0.0
+    cdar_95: float = 0.0
+    drawdown_10pct_events: int = 0
+    drawdown_15pct_events: int = 0
+    drawdown_20pct_events: int = 0
 
 
 def _annual_returns(daily_values: pd.Series) -> pd.Series:
@@ -71,6 +80,16 @@ def _worst_rolling_return(daily_values: pd.Series, window: int) -> float:
     return float(rolling.min()) if len(rolling) else 0.0
 
 
+def _worst_rolling_real_return(daily_values: pd.Series, window: int, inflation_annual: float) -> float:
+    if len(daily_values) < window + 1:
+        return 0.0
+    nominal = daily_values.pct_change(window).dropna()
+    if len(nominal) == 0:
+        return 0.0
+    real = (1.0 + nominal) / ((1.0 + inflation_annual) ** (window / 252.0)) - 1.0
+    return float(real.min())
+
+
 def _longest_underwater_days(daily_values: pd.Series) -> int:
     peak = daily_values.cummax()
     underwater = daily_values < peak
@@ -82,6 +101,50 @@ def _longest_underwater_days(daily_values: pd.Series) -> int:
         else:
             current = 0
     return longest
+
+
+def _drawdown_series(daily_values: pd.Series) -> pd.Series:
+    return daily_values / daily_values.cummax() - 1.0
+
+
+def _drawdown_event_count(drawdown: pd.Series, threshold: float) -> int:
+    in_event = False
+    events = 0
+    for value in drawdown:
+        breached = value <= threshold
+        if breached and not in_event:
+            events += 1
+            in_event = True
+        elif value >= 0:
+            in_event = False
+    return events
+
+
+def _drawdown_pain_metrics(daily_values: pd.Series) -> dict[str, float | int]:
+    drawdown = _drawdown_series(daily_values)
+    negative = drawdown[drawdown < 0]
+    abs_negative = negative.abs()
+    if abs_negative.empty:
+        return {
+            "average_drawdown": 0.0,
+            "ulcer_index": 0.0,
+            "pain_index": 0.0,
+            "cdar_95": 0.0,
+            "drawdown_10pct_events": 0,
+            "drawdown_15pct_events": 0,
+            "drawdown_20pct_events": 0,
+        }
+    cutoff = abs_negative.quantile(0.95)
+    tail = abs_negative[abs_negative >= cutoff]
+    return {
+        "average_drawdown": -float(abs_negative.mean()),
+        "ulcer_index": float(np.sqrt((drawdown.pow(2).mean()))),
+        "pain_index": float(abs_negative.sum() / len(drawdown)),
+        "cdar_95": -float(tail.mean()) if len(tail) else 0.0,
+        "drawdown_10pct_events": _drawdown_event_count(drawdown, -0.10),
+        "drawdown_15pct_events": _drawdown_event_count(drawdown, -0.15),
+        "drawdown_20pct_events": _drawdown_event_count(drawdown, -0.20),
+    }
 
 
 def _max_drawdown_recovery_days(daily_values: pd.Series) -> int | None:
@@ -136,6 +199,10 @@ def compute_metrics(
     worst_1y = _worst_rolling_return(daily, 252)
     worst_3y = _worst_rolling_return(daily, 252 * 3)
     worst_5y = _worst_rolling_return(daily, 252 * 5)
+    worst_1y_real = _worst_rolling_real_return(daily, 252, inflation_annual)
+    worst_3y_real = _worst_rolling_real_return(daily, 252 * 3, inflation_annual)
+    worst_5y_real = _worst_rolling_real_return(daily, 252 * 5, inflation_annual)
+    pain = _drawdown_pain_metrics(daily)
 
     return PerformanceMetrics(
         annualized_return=ann_return,
@@ -154,10 +221,17 @@ def compute_metrics(
         worst_rolling_1y_return=worst_1y,
         worst_rolling_3y_return=worst_3y,
         worst_rolling_5y_return=worst_5y,
-        worst_rolling_1y_real_return=worst_1y,
-        worst_rolling_3y_real_return=worst_3y,
-        worst_rolling_5y_real_return=worst_5y,
+        worst_rolling_1y_real_return=worst_1y_real,
+        worst_rolling_3y_real_return=worst_3y_real,
+        worst_rolling_5y_real_return=worst_5y_real,
         longest_underwater_days=_longest_underwater_days(daily),
+        average_drawdown=float(pain["average_drawdown"]),
+        ulcer_index=float(pain["ulcer_index"]),
+        pain_index=float(pain["pain_index"]),
+        cdar_95=float(pain["cdar_95"]),
+        drawdown_10pct_events=int(pain["drawdown_10pct_events"]),
+        drawdown_15pct_events=int(pain["drawdown_15pct_events"]),
+        drawdown_20pct_events=int(pain["drawdown_20pct_events"]),
     )
 
 
@@ -262,10 +336,12 @@ def classify_suitability(
     qdii_friction_months: int = 0,
     qdii_recovery_months: int = 0,
     investor_profiles: tuple[InvestorProfile, ...] = DEFAULT_INVESTOR_PROFILES,
+    sequence_risk: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, ProfileSuitability]:
     profiles: dict[str, ProfileSuitability] = {}
     qdii_reasons, qdii_warnings = _qdii_notes(qdii_fill_rate, avg_qdii_weight_gap, qdii_friction_months, qdii_recovery_months)
 
+    sequence_risk = sequence_risk or {}
     for profile in investor_profiles:
         if profile.profile_id == "accumulation":
             profiles[profile.profile_id] = _classify_accumulation(metrics, qdii_reasons, qdii_warnings, profile)
@@ -275,6 +351,10 @@ def classify_suitability(
             profiles[profile.profile_id] = _classify_preservation(metrics, qdii_fill_rate, qdii_warnings, profile)
         else:
             profiles[profile.profile_id] = _classify_retirement(metrics, profile)
+        seq = sequence_risk.get(profile.profile_id)
+        if seq is not None:
+            profiles[profile.profile_id].sequence_risk_classification = str(seq.get("classification", "normal"))
+            profiles[profile.profile_id].sequence_risk_reasons = list(seq.get("reasons", []))
 
     return profiles
 

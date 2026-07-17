@@ -22,6 +22,8 @@ The asset universe SHALL map each portfolio quadrant to tradable off-exchange op
 
 The Stocks quadrant SHALL allocate 60% to domestic CSI 300 feeder fund and 40% to S&P 500 QDII feeder fund. This yields approximately 10% of total portfolio in global equity exposure (25% × 40% = 10%).
 
+The default stock sub-split SHALL be 60/40.
+
 #### Scenario: Stocks sub-allocation on purchase
 
 - **WHEN** funds are allocated to the Stocks quadrant with amount S
@@ -110,6 +112,8 @@ Backup QDII funds (050025, 006075) SHALL be modeled with independent daily caps 
 ### Requirement: Instrument metadata
 
 Each instrument in the asset universe MUST be recorded with: fund code, quadrant assignment, role (primary), and account type (场外 / QDII where applicable). QDII instruments MUST additionally record simulated daily subscription cap and quota risk level for backtest configuration. Instruments used in simulation MUST additionally record machine-readable `TradeFees` with purchase and redemption rates.
+
+The asset universe SHALL expose machine-readable constants for `PRICE_MATRIX_SYMBOLS`, `QDII_BACKUP_SYMBOLS`, `BOND_VARIANTS`, `DEFAULT_QDII_DAILY_CAP`, and the default Stocks sub-split.
 
 #### Scenario: QDII instrument account requirement
 

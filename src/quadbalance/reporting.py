@@ -14,13 +14,20 @@ from quadbalance.instrument_pool import format_pool_markdown, format_qdii_era_ma
 from quadbalance.profile_thresholds import InvestorProfile, DEFAULT_INVESTOR_PROFILES, overridden_fields
 from quadbalance.proxy_sensitivity import SensitivitySummary, format_sensitivity_summary_markdown
 from quadbalance.reporting_sections import (
+    format_behavior_stress_markdown,
     format_boundary_summary,
+    format_cross_border_stress_markdown,
     format_lifecycle_summary,
     format_lock_selection_notes,
     format_long_term_stress_markdown,
+    format_path_stress_markdown,
+    format_product_risk_markdown,
     format_profile_suitability_summary,
+    format_risk_overview_panel,
     format_profile_thresholds_summary,
     format_rebalance_execution_markdown,
+    format_risk_map_markdown,
+    format_robustness_summary_markdown,
     format_stress_summary_markdown,
 )
 from quadbalance.simulator import SimulationResult
@@ -51,6 +58,8 @@ def generate_lock_document(
         "# Strategy Lock Document",
         "",
         f"**Locked date:** {date.today().isoformat()}",
+        format_risk_overview_panel(validation),
+        format_risk_summary_page(validation),
         f"**Configuration ID:** {config.config_id}",
         f"**Status:** locked",
         "",
@@ -80,6 +89,7 @@ def generate_lock_document(
         f"- DCA method: {config.dca_method}",
         f"- Rebalance threshold: ±{config.rebalance_threshold:.0%}",
         f"- QDII daily caps: {config.qdii_daily_caps}",
+        "- Sequence-risk profiles: fixed nominal, inflation-adjusted, percentage-of-portfolio, guardrail-based, lumpy expense, and contribution interruption scenarios",
         "",
         "## Backtest Period",
         "",
@@ -100,6 +110,11 @@ def generate_lock_document(
         f"| Real terminal wealth | {m.real_terminal_wealth:,.0f} |",
         f"| Worst rolling 3y real return | {m.worst_rolling_3y_real_return:.2%} |",
         f"| Longest underwater days | {m.longest_underwater_days} |",
+        f"| Average drawdown | {m.average_drawdown:.2%} |",
+        f"| Ulcer index | {m.ulcer_index:.2%} |",
+        f"| Pain index | {m.pain_index:.2%} |",
+        f"| CDaR 95 | {m.cdar_95:.2%} |",
+        f"| Drawdown events ≤ -10% / -15% / -20% | {m.drawdown_10pct_events} / {m.drawdown_15pct_events} / {m.drawdown_20pct_events} |",
         "",
         format_fee_assumptions_markdown(),
     ]
@@ -136,6 +151,12 @@ def generate_lock_document(
         "",
     ])
     lines.append(format_stress_summary_markdown(validation.stress_results))
+    lines.append(format_path_stress_markdown(getattr(validation, "path_stress_results", [])))
+    lines.append(format_behavior_stress_markdown(getattr(validation, "behavior_stress_results", [])))
+    lines.append(format_cross_border_stress_markdown(getattr(validation, "cross_border_stress_results", [])))
+    lines.append(format_product_risk_markdown(getattr(validation, "product_risk", None)))
+    lines.append(format_robustness_summary_markdown(getattr(validation, "robustness", None)))
+    lines.append(format_risk_map_markdown(validation))
     long_term_results = getattr(validation, "long_term_results", [])
     if long_term_results:
         worst_classification = "thesis-broken" if any(r.classification == "thesis-broken" for r in long_term_results) else (

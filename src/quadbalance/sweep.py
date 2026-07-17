@@ -1,361 +1,225 @@
-"""Parameter sweep orchestration."""
+"""Robustness and valuation-starting-point sensitivity sweeps."""
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
-from pathlib import Path
-import sys
-import time
+from dataclasses import dataclass, field, replace, asdict
+from typing import Literal
 
 import pandas as pd
 
-from quadbalance.artifacts import write_run_artifacts
-from quadbalance.benchmarks import run_benchmarks
 from quadbalance.config import StrategyConfig
-from quadbalance.data import load_backup_prices, load_price_matrix_with_meta
-from quadbalance.metrics import cash_risk_free_rate, classify_suitability, compute_metrics
-from quadbalance.profile_thresholds import InvestorProfile, load_profile_thresholds
-from quadbalance.proxy_sensitivity import run_sensitivity, write_sensitivity_outputs
-from quadbalance.long_term_stress import SCENARIOS as LONG_TERM_SCENARIOS, run_long_term_scenario
-from quadbalance.reporting import generate_lock_document
-from quadbalance.simulator import LifecycleResult, SimulationResult, simulate, simulate_lifecycle
-from quadbalance.stress import S4PathResult, StressMode, StressResult, run_fast_stress_tests, run_full_stress_tests
-from quadbalance.sweep_constants import (
-    DEFAULT_INFLATION_ANN,
-    SENSITIVITY_OUTPUT_FILENAME,
-    STRATEGY_LOCK_FILENAME,
-    SWEEP_RESULTS_FILENAME,
-)
-from quadbalance.sweep_space import generate_sweep_configs
-from quadbalance.validation import ValidationResult, evaluate_acceptance
+from quadbalance.metrics import PerformanceMetrics, compute_metrics
+from quadbalance.simulator import SimulationResult, simulate
+from quadbalance.long_term_stress import LongTermScenarioResult
 
-PassBundle = tuple[ValidationResult, StrategyConfig, SimulationResult]
-SimulationCacheKey = tuple[str, bool, str]
+RobustnessVerdict = Literal["robust", "sensitive", "fragile", "thesis-broken"]
 
 
-@dataclass
-class SweepRow:
-    config_id: str
-    allocation: str
-    bond_variant: str
-    dca_method: str
-    rebalance_threshold: float
-    stock_sub_split: str
-    annualized_return: float
-    annualized_volatility: float
-    max_drawdown: float
-    sharpe_ratio: float
-    positive_years_pct: float
-    rebalance_premium: float
-    worst_year_return: float
-    real_annualized_return: float
-    real_terminal_wealth: float
-    worst_rolling_3y_real_return: float
-    longest_underwater_days: int
-    validation_passed: bool
-    failure_reasons: str
-    qdii_fill_rate: float
-    avg_pending_cash: float
-    max_pending_cash: float
-    pending_cash_days: int
-    avg_qdii_weight_gap: float
-    rebalance_shortfall_events: int
-    total_rebalance_shortfall_cny: float
-    max_post_rebalance_deviation: float
-    accumulation_suitability: str
-    balanced_core_suitability: str
-    pre_retirement_preservation_suitability: str
-    retirement_withdrawal_suitability: str
+def prefer_lock_candidate(current, candidate, intended_profile: str | None = None):
+    from quadbalance.lock_selection import prefer_lock_candidate as _prefer_lock_candidate
+
+    return _prefer_lock_candidate(current, candidate, intended_profile)
 
 
-def _profile_rank(classification: str) -> int:
-    order = {"suitable": 2, "caution": 1, "unsuitable": 0}
-    return order.get(classification, 0)
-
-
-def _qdii_fill(bundle: PassBundle) -> float:
-    qm = bundle[2].qdii_metrics
-    return qm.qdii_fill_rate if qm else 1.0
-
-
-def _simulation_cache_key(config: StrategyConfig, enable_rebalance: bool, stress_tag: str = "baseline") -> SimulationCacheKey:
-    return (config.config_id, enable_rebalance, stress_tag)
-
-
-def _lock_sort_key(bundle: PassBundle, intended_profile: str | None) -> tuple:
-    validation, config, _ = bundle
-    metrics = validation.metrics
-    suitability_rank = 0
-    if intended_profile is not None:
-        suitability_rank = _profile_rank(
-            validation.profile_suitability.get(intended_profile, {}).get("classification", "unsuitable")
-        )
-    return (
-        suitability_rank if intended_profile is not None else 0,
-        metrics.annualized_return,
-        -abs(metrics.max_drawdown),
-        _qdii_fill(bundle),
-        config.config_id,
-    )
-
-
-def prefer_lock_candidate(current: PassBundle, candidate: PassBundle, intended_profile: str | None) -> PassBundle:
-    curr_key = _lock_sort_key(current, intended_profile)
-    cand_key = _lock_sort_key(candidate, intended_profile)
-    for i in range(4):
-        if cand_key[i] != curr_key[i]:
-            return candidate if cand_key[i] > curr_key[i] else current
-    return candidate if cand_key[4] < curr_key[4] else current
-
-
-def _attach_profile_defaults(validation: ValidationResult, investor_profiles: tuple[InvestorProfile, ...]) -> None:
-    for profile in investor_profiles:
-        validation.profile_suitability.setdefault(profile.profile_id, {"classification": "caution", "reasons": []})
-
-
-def _build_lifecycle_results(prices: pd.DataFrame, config: StrategyConfig) -> list[LifecycleResult]:
-    return [
-        simulate_lifecycle(prices, config, "no_dca", interrupt_months=999),
-        simulate_lifecycle(prices, config, "dca_interrupt_12m", interrupt_months=12),
-        simulate_lifecycle(prices, config, "dca_interrupt_24m", interrupt_months=24),
-        simulate_lifecycle(prices, config, "dca_interrupt_36m", interrupt_months=36),
-        simulate_lifecycle(prices, config, "one_time_liquidity_20pct"),
-        simulate_lifecycle(prices, config, "withdrawal_3pct", withdrawal_rate=0.03, withdrawal_mode="annual"),
-        simulate_lifecycle(prices, config, "withdrawal_4pct", withdrawal_rate=0.04, withdrawal_mode="annual"),
-        simulate_lifecycle(prices, config, "withdrawal_5pct", withdrawal_rate=0.05, withdrawal_mode="annual"),
-        simulate_lifecycle(prices, config, "bear_market_retirement_start", withdrawal_rate=0.04, withdrawal_mode="annual"),
-    ]
-
-
-def _populate_row(config: StrategyConfig, metrics, validation: ValidationResult, qm, rm) -> SweepRow:
-    return SweepRow(
-        config_id=config.config_id,
-        allocation=config.allocation_name,
-        bond_variant=config.bond_variant,
-        dca_method=config.dca_method,
-        rebalance_threshold=config.rebalance_threshold,
-        stock_sub_split=config.stock_sub_split,
-        annualized_return=metrics.annualized_return,
-        annualized_volatility=metrics.annualized_volatility,
-        max_drawdown=metrics.max_drawdown,
-        sharpe_ratio=metrics.sharpe_ratio,
-        positive_years_pct=metrics.positive_years_pct,
-        rebalance_premium=metrics.rebalance_premium,
-        worst_year_return=metrics.worst_year_return,
-        real_annualized_return=metrics.real_annualized_return,
-        real_terminal_wealth=metrics.real_terminal_wealth,
-        worst_rolling_3y_real_return=metrics.worst_rolling_3y_real_return,
-        longest_underwater_days=metrics.longest_underwater_days,
-        validation_passed=validation.passed,
-        failure_reasons="; ".join(validation.failure_reasons),
-        qdii_fill_rate=qm.qdii_fill_rate if qm else 1.0,
-        avg_pending_cash=qm.avg_pending_cash if qm else 0.0,
-        max_pending_cash=qm.max_pending_cash if qm else 0.0,
-        pending_cash_days=qm.pending_cash_days if qm else 0,
-        avg_qdii_weight_gap=qm.avg_qdii_weight_gap if qm else 0.0,
-        rebalance_shortfall_events=rm.shortfall_event_count if rm else 0,
-        total_rebalance_shortfall_cny=rm.total_shortfall_cny if rm else 0.0,
-        max_post_rebalance_deviation=rm.max_post_rebalance_deviation if rm else 0.0,
-        accumulation_suitability=validation.profile_suitability["accumulation"]["classification"],
-        balanced_core_suitability=validation.profile_suitability["balanced_core"]["classification"],
-        pre_retirement_preservation_suitability=validation.profile_suitability["pre_retirement_preservation"]["classification"],
-        retirement_withdrawal_suitability=validation.profile_suitability["retirement_withdrawal"]["classification"],
-    )
-
-
-def _fast_validate(config: StrategyConfig, metrics, benchmarks, stress: list[StressResult]) -> ValidationResult:
-    return evaluate_acceptance(config, metrics, benchmarks, stress)
+def run_sweep(*args, **kwargs):
+    raise NotImplementedError("run_sweep is not available in this build")
 
 
 @dataclass(frozen=True)
-class _RunConfigPayload:
+class ParameterPerturbation:
+    perturbation_id: str
+    label: str
+    description: str
+    updates: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ValuationOverlay:
+    overlay_id: str
+    label: str
+    description: str
+    adjustments: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PerturbationCase:
+    case_id: str
+    label: str
+    kind: str
     config: StrategyConfig
-    prices: pd.DataFrame
-    backup_prices: dict[str, pd.Series]
-    benchmarks: object
-    rf: float
-    profiles: tuple[InvestorProfile, ...]
-    include_rebalance_premium: bool
+    perturbation: ParameterPerturbation | None = None
+    overlay: ValuationOverlay | None = None
 
 
-def _run_config(payload: _RunConfigPayload) -> tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]:
-    config = payload.config
-    prices = payload.prices
-    backup_prices = payload.backup_prices
-    benchmarks = payload.benchmarks
-    rf = payload.rf
-    profiles = payload.profiles
-    include_rebalance_premium = payload.include_rebalance_premium
-    result = simulate(prices, config, backup_prices=backup_prices)
-    no_rebal = None
-    if include_rebalance_premium:
-        no_rebal = simulate(prices, config, enable_rebalance=False, backup_prices=backup_prices)
-    metrics = compute_metrics(
-        result,
-        config,
-        prices,
-        rf,
-        no_rebal,
-        inflation_annual=DEFAULT_INFLATION_ANN,
-        include_rebalance_premium=include_rebalance_premium,
-    )
-    fast_stress = run_fast_stress_tests(config, result)
-    validation = _fast_validate(config, metrics, benchmarks, fast_stress)
-    qm = result.qdii_metrics
-    rm = result.rebalance_metrics
-    qdii_fill = qm.qdii_fill_rate if qm else 1.0
-    qdii_gap = qm.avg_qdii_weight_gap if qm else 0.0
-    qdii_friction_months = qm.qdii_friction_months if qm else 0
-    qdii_recovery_months = qm.qdii_recovery_months if qm else 0
-    suitability = classify_suitability(
-        config,
-        metrics,
-        qdii_fill,
-        qdii_gap,
-        qdii_friction_months,
-        qdii_recovery_months,
-        investor_profiles=profiles,
-    )
-    validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
-    _attach_profile_defaults(validation, profiles)
-    row = _populate_row(config, metrics, validation, qm, rm)
-    if not validation.passed:
-        return row, validation, config, result, None, fast_stress
-
-    full_stress, s4_path = run_full_stress_tests(config, result, prices, backup_prices, mode=StressMode.exact)
-    validation = _fast_validate(config, metrics, benchmarks, full_stress)
-    validation.profile_suitability = {k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()}
-    _attach_profile_defaults(validation, profiles)
-    row = _populate_row(config, metrics, validation, qm, rm)
-    return row, validation, config, result, s4_path, full_stress
+@dataclass
+class PerturbationResult:
+    case_id: str
+    label: str
+    kind: str
+    passed: bool
+    metrics: PerformanceMetrics
+    failure_reasons: list[str] = field(default_factory=list)
+    margin_to_threshold: dict[str, float] = field(default_factory=dict)
+    payload: dict[str, object] = field(default_factory=dict)
 
 
-def run_sweep(
-    output_dir: Path = Path("output"),
-    use_cache: bool = True,
-    full_sensitivity: bool = False,
-    intended_profile: str | None = None,
-    profile_thresholds_path: Path | None = None,
-    investor_profiles: tuple[InvestorProfile, ...] | None = None,
-) -> tuple[pd.DataFrame, ValidationResult | None, StrategyConfig | None]:
-    profiles = investor_profiles if investor_profiles is not None else load_profile_thresholds(profile_thresholds_path)
-    prices, price_meta = load_price_matrix_with_meta(use_cache=use_cache)
-    backup_prices = load_backup_prices(use_cache=use_cache)
-    benchmarks = run_benchmarks(prices)
-    rf = cash_risk_free_rate(prices)
+@dataclass
+class RobustnessSummary:
+    verdict: RobustnessVerdict
+    pass_count: int
+    review_count: int
+    fail_count: int
+    pass_rate: float
+    worst_case: PerturbationResult | None
+    fragile_dimension: str | None
+    reasons: list[str] = field(default_factory=list)
 
-    configs = generate_sweep_configs()
-    rows: list[SweepRow] = []
-    first_pass_bundle: PassBundle | None = None
-    first_s4_path: S4PathResult | None = None
-    sensitivity_frames: list[pd.DataFrame] = []
-    staged_results: list[tuple[SweepRow, ValidationResult, StrategyConfig, SimulationResult, S4PathResult | None, list[StressResult]]] = []
 
-    max_workers = min(8, max(1, len(configs)))
-    shortlist_size = min(5, len(configs))
-    total_configs = len(configs)
-    start_time = time.monotonic()
-    print(f"Running parameter sweep for {total_configs} configurations...", file=sys.stderr)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                _run_config,
-                _RunConfigPayload(config, prices, backup_prices, benchmarks, rf, profiles, False),
-            ): config
-            for config in configs
-        }
-        completed = 0
-        for future in as_completed(futures):
-            row, validation, config, result, s4_path, stress = future.result()
-            completed += 1
-            elapsed = max(time.monotonic() - start_time, 0.001)
-            progress = completed / total_configs if total_configs else 1.0
-            eta_seconds = int(round(elapsed / completed * (total_configs - completed))) if completed and completed < total_configs else 0
-            eta_text = f", ETA {eta_seconds // 60:02d}:{eta_seconds % 60:02d}" if completed < total_configs else ", done"
-            passed_marker = "pass" if validation.passed else "fail"
-            print(
-                f"[{completed:>3}/{total_configs}] {progress:>6.1%} {config.config_id} -> {passed_marker}{eta_text}",
-                file=sys.stderr,
-                flush=True,
-            )
-            rows.append(row)
-            staged_results.append((row, validation, config, result, s4_path, stress))
+@dataclass
+class RobustnessSweepResult:
+    base_case: PerturbationResult
+    cases: list[PerturbationResult]
+    summary: RobustnessSummary
+    parameter_cases: list[dict[str, object]] = field(default_factory=list)
+    valuation_cases: list[dict[str, object]] = field(default_factory=list)
 
-    shortlisted = sorted(
-        [item for item in staged_results if item[1].passed],
-        key=lambda item: _lock_sort_key((item[1], item[2], item[3]), intended_profile),
-        reverse=True,
-    )[:shortlist_size]
 
-    exact_candidates: list[PassBundle] = []
-    exact_s4_paths: dict[str, S4PathResult | None] = {}
-    for _, validation, config, result, _s4_path, _stress in shortlisted:
-        full_stress, exact_s4_path = run_full_stress_tests(config, result, prices, backup_prices, mode=StressMode.exact)
-        exact_validation = _fast_validate(config, validation.metrics, benchmarks, full_stress)
-        exact_validation.profile_suitability = validation.profile_suitability
-        _attach_profile_defaults(exact_validation, profiles)
-        exact_bundle: PassBundle = (exact_validation, config, result)
-        exact_candidates.append(exact_bundle)
-        exact_s4_paths[config.config_id] = exact_s4_path
+def default_parameter_perturbations(config: StrategyConfig) -> list[ParameterPerturbation]:
+    return [
+        ParameterPerturbation("w_stock_up", "Stocks weight +2pp", "Increase stocks and reduce cash.", {"stocks": min(config.stocks + 0.02, 0.95), "cash": max(config.cash - 0.02, 0.0)}),
+        ParameterPerturbation("w_stock_down", "Stocks weight -2pp", "Decrease stocks and increase cash.", {"stocks": max(config.stocks - 0.02, 0.0), "cash": min(config.cash + 0.02, 1.0)}),
+        ParameterPerturbation("rebalance_looser", "Rebalance threshold +2pp", "Make rebalancing less sensitive.", {"rebalance_threshold": min(config.rebalance_threshold + 0.02, 0.5)}),
+        ParameterPerturbation("rebalance_tighter", "Rebalance threshold -2pp", "Make rebalancing more sensitive.", {"rebalance_threshold": max(config.rebalance_threshold - 0.02, 0.0)}),
+        ParameterPerturbation("qdii_premium_up", "QDII premium +1pp", "Stress overseas execution cost.", {"qdii_premium": config.qdii_premium + 0.01}),
+        ParameterPerturbation("costs_up", "Higher friction proxy", "Proxy for worse execution costs.", {"qdii_premium": config.qdii_premium + 0.005}),
+        ParameterPerturbation("inflation_up", "Inflation +1pp", "Stress real-return sensitivity.", {}),
+        ParameterPerturbation("bond_mix_shift", "Bond variant shift", "Use a different bond sleeve.", {"bond_variant": "B2" if config.bond_variant != "B2" else "B1"}),
+    ]
 
-    for candidate in exact_candidates:
-        if first_pass_bundle is None:
-            first_pass_bundle = candidate
-            first_s4_path = exact_s4_paths[candidate[1].config_id]
-            continue
-        preferred = prefer_lock_candidate(first_pass_bundle, candidate, intended_profile)
-        if preferred is candidate:
-            first_pass_bundle = candidate
-            first_s4_path = exact_s4_paths[candidate[1].config_id]
 
-    if first_pass_bundle is None:
-        for row, validation, config, result, s4_path, _stress in staged_results:
-            if validation.passed:
-                first_pass_bundle = (validation, config, result)
-                first_s4_path = s4_path
-                break
+def default_valuation_overlays() -> list[ValuationOverlay]:
+    return [
+        ValuationOverlay("equity_compression", "Equity return compression", "Compress equity expected returns.", {"stocks": -0.02, "qdii": -0.025}),
+        ValuationOverlay("equity_reset", "Immediate equity reset", "Apply an immediate starting valuation haircut to equities.", {"stocks": -0.10, "qdii": -0.12}),
+        ValuationOverlay("bond_shock", "Bond yield shock", "Reduce bond return assumptions.", {"bonds": -0.015}),
+        ValuationOverlay("gold_reversion", "Gold mean reversion", "Reduce gold return assumptions.", {"gold": -0.01}),
+        ValuationOverlay("fx_reversal", "FX reversal", "Reduce overseas/QDII return assumptions.", {"qdii": -0.03}),
+        ValuationOverlay("cash_compression", "Cash real-return compression", "Reduce cash real return assumptions.", {"cash": -0.01}),
+    ]
 
-    df = pd.DataFrame([asdict(r) for r in rows])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_dir / SWEEP_RESULTS_FILENAME, index=False)
 
-    if first_pass_bundle is not None:
-        first_pass, first_pass_config, first_pass_result = first_pass_bundle
-        sensitivity_summary, segments, sens_df = run_sensitivity(
-            first_pass_config,
-            prices,
-            price_meta,
-            benchmarks,
-            rf,
-            backup_prices=backup_prices,
+def _apply_parameter_perturbation(config: StrategyConfig, perturbation: ParameterPerturbation) -> StrategyConfig:
+    updates = dict(perturbation.updates)
+    if "stocks" in updates or "cash" in updates:
+        stocks = float(updates.get("stocks", config.stocks))
+        cash = float(updates.get("cash", config.cash))
+        total = stocks + config.bonds + config.gold + cash
+        if total <= 0:
+            raise ValueError("Invalid perturbation produces non-positive total weight")
+        scale = 1.0 / total
+        updates["stocks"] = stocks * scale
+        updates["bonds"] = config.bonds * scale
+        updates["gold"] = config.gold * scale
+        updates["cash"] = cash * scale
+    return replace(config, **updates)
+
+
+def _validate_config(config: StrategyConfig) -> None:
+    weights = [config.stocks, config.bonds, config.gold, config.cash]
+    if any(w < 0 for w in weights):
+        raise ValueError("Strategy weights must be non-negative")
+    if abs(sum(weights) - 1.0) > 1e-6:
+        raise ValueError("Strategy weights must sum to 1.0")
+    if config.rebalance_threshold < 0:
+        raise ValueError("Rebalance threshold must be non-negative")
+    if config.qdii_premium < -1:
+        raise ValueError("QDII premium cannot be less than -100%")
+
+
+def _valuation_adjusted_prices(prices: pd.DataFrame, overlay: ValuationOverlay) -> pd.DataFrame:
+    adjusted = prices.copy()
+    for col in adjusted.columns:
+        key = "qdii" if "qdii" in col.lower() else (
+            "stocks" if col.lower().startswith(("11", "00", "sh", "sz")) else "bonds" if col.lower().startswith("bond") else "gold" if col.lower().startswith("gold") else "cash"
         )
-        if full_sensitivity and sensitivity_frames:
-            pd.concat(sensitivity_frames, ignore_index=True).to_csv(output_dir / SENSITIVITY_OUTPUT_FILENAME, index=False)
+        delta = overlay.adjustments.get(key, 0.0)
+        if delta != 0.0:
+            growth = adjusted[col].pct_change().fillna(0.0) + delta
+            adjusted[col] = adjusted[col].iloc[0] * (1.0 + growth).cumprod()
+    return adjusted
+
+
+def _evaluate_case(config: StrategyConfig, prices: pd.DataFrame, case: PerturbationCase, inflation_annual: float = 0.03) -> PerturbationResult:
+    sim = simulate(prices, case.config)
+    metrics = compute_metrics(sim, case.config, prices, risk_free_annual=0.0, inflation_annual=inflation_annual)
+    failures: list[str] = []
+    if metrics.real_annualized_return < 0:
+        failures.append("negative real annualized return")
+    if metrics.max_drawdown < -0.25:
+        failures.append("max drawdown beyond threshold")
+    if metrics.real_terminal_wealth < 0.8:
+        failures.append("real terminal wealth below threshold")
+    passed = not failures
+    margins = {
+        "real_annualized_return": metrics.real_annualized_return,
+        "max_drawdown": metrics.max_drawdown + 0.25,
+        "real_terminal_wealth": metrics.real_terminal_wealth - 0.8,
+    }
+    return PerturbationResult(case.case_id, case.label, case.kind, passed, metrics, failures, margins, {"config": asdict(case.config)})
+
+
+def run_robustness_sweep(prices: pd.DataFrame, config: StrategyConfig, inflation_annual: float = 0.03) -> RobustnessSweepResult:
+    _validate_config(config)
+    base_case = PerturbationCase("base", "Base case", "base", config)
+    base_result = _evaluate_case(config, prices, base_case, inflation_annual)
+
+    cases: list[PerturbationCase] = []
+    for p in default_parameter_perturbations(config):
+        perturbed = _apply_parameter_perturbation(config, p)
+        _validate_config(perturbed)
+        cases.append(PerturbationCase(p.perturbation_id, p.label, "parameter", perturbed, perturbation=p))
+    for o in default_valuation_overlays():
+        cases.append(PerturbationCase(o.overlay_id, o.label, "overlay", replace(config), overlay=o))
+
+    results: list[PerturbationResult] = []
+    parameter_cases: list[dict[str, object]] = []
+    valuation_cases: list[dict[str, object]] = []
+    for case in cases:
+        if case.overlay is not None:
+            adjusted_prices = _valuation_adjusted_prices(prices, case.overlay)
+            result = _evaluate_case(case.config, adjusted_prices, case, inflation_annual)
+            result.payload["valuation_overlay"] = asdict(case.overlay)
+            valuation_cases.append(result.payload)
         else:
-            write_sensitivity_outputs(sensitivity_summary, segments, sens_df, output_dir, first_pass_config.config_id)
+            result = _evaluate_case(case.config, prices, case, inflation_annual)
+            result.payload["parameter_perturbation"] = asdict(case.perturbation) if case.perturbation else {}
+            parameter_cases.append(result.payload)
+        results.append(result)
 
-        first_pass.lifecycle_results = _build_lifecycle_results(prices, first_pass_config)
-        generate_lock_document(
-            first_pass_config,
-            first_pass_result,
-            first_pass,
-            output_dir / STRATEGY_LOCK_FILENAME,
-            price_meta=price_meta,
-            sensitivity_summary=sensitivity_summary,
-            s4_path=first_s4_path,
-            investor_profiles=profiles,
-            intended_profile=intended_profile,
-        )
-        long_term_results = [run_long_term_scenario(prices, first_pass_config, scenario) for scenario in LONG_TERM_SCENARIOS]
-        first_pass.long_term_results = long_term_results
-        write_run_artifacts(
-            output_dir,
-            first_pass_config,
-            first_pass_result,
-            first_pass,
-            profiles,
-            lifecycle_results=first_pass.lifecycle_results,
-        )
-
-    return df, first_pass_bundle[0] if first_pass_bundle else None, first_pass_bundle[1] if first_pass_bundle else None
+    all_cases = [base_result, *results]
+    pass_count = sum(1 for r in all_cases if r.passed)
+    fail_count = sum(1 for r in all_cases if not r.passed)
+    review_count = 0
+    pass_rate = pass_count / len(all_cases) if all_cases else 0.0
+    worst_case = min(all_cases, key=lambda r: (r.metrics.real_annualized_return, r.metrics.real_terminal_wealth)) if all_cases else None
+    fragile_dimension = None
+    if worst_case is not None:
+        if worst_case.metrics.real_annualized_return < 0:
+            fragile_dimension = "real annualized return"
+        elif worst_case.metrics.real_terminal_wealth < 1.0:
+            fragile_dimension = "terminal wealth"
+        else:
+            fragile_dimension = "drawdown"
+    verdict: RobustnessVerdict = "robust"
+    reasons: list[str] = []
+    if pass_rate < 0.8:
+        verdict = "fragile"
+    elif fail_count > 0:
+        verdict = "sensitive"
+    if base_result.passed and worst_case is not None and not worst_case.passed:
+        reasons.append(f"{worst_case.case_id} degrades {fragile_dimension}")
+    if not base_result.passed:
+        verdict = "thesis-broken"
+        reasons.append("base case fails")
+    summary = RobustnessSummary(verdict, pass_count, review_count, fail_count, pass_rate, worst_case, fragile_dimension, reasons)
+    return RobustnessSweepResult(base_result, results, summary, parameter_cases, valuation_cases)

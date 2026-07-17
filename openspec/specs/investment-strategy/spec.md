@@ -8,6 +8,8 @@ Define the mechanical execution rules for the China permanent portfolio: four-qu
 
 The strategy SHALL divide the portfolio into four quadrants with equal default target weights: Stocks 25%, Bonds 25%, Gold 25%, Cash 25%. Each quadrant maps to one economic scenario: prosperity (stocks), deflation (bonds), inflation (gold), recession (cash).
 
+The Stocks quadrant SHALL use a default domestic/QDII sub-split of 60%/40%.
+
 #### Scenario: Default allocation sums to 100%
 
 - **WHEN** the strategy is initialized with default parameters

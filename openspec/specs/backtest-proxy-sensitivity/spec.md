@@ -27,6 +27,8 @@ The backtest engine SHALL run deterministic tracking-error sensitivity scenarios
 
 For each sensitivity scenario, the engine SHALL compute: annualized return, maximum drawdown, Sharpe ratio, worst calendar year return, and whether the configuration would still pass acceptance criteria 1–5.
 
+The baseline row MUST be included in the output set and identified by the `baseline` scenario ID.
+
 #### Scenario: Sensitivity metrics per scenario
 
 - **WHEN** a drift scenario simulation completes
@@ -36,6 +38,8 @@ For each sensitivity scenario, the engine SHALL compute: annualized return, maxi
 ### Requirement: Segmented era reporting
 
 The engine SHALL report performance metrics split by calendar era: `proxy_era` (2013-01-01 through 2016-12-31) and `primary_era` (2017-01-01 through latest data date). Each era MUST report annualized return, maximum drawdown, and positive years percentage.
+
+If the effective backtest start is after 2016-12-31, the proxy era metrics MAY be omitted and the report SHALL note that the proxy era is not covered.
 
 #### Scenario: Proxy era metrics reported
 
@@ -62,6 +66,8 @@ The strategy lock document MUST include a Proxy Sensitivity Summary section show
 ### Requirement: Sensitivity output files
 
 The validation run SHALL write `output/proxy_sensitivity.csv` with one row per sensitivity scenario and `output/segment_metrics.csv` with one row per calendar era segment.
+
+Both files MUST include `config_id` as the first column. `proxy_sensitivity.csv` MUST include `scenario_id`, `primary_symbol`, `annual_drift`, `annualized_return`, `max_drawdown`, `sharpe_ratio`, `worst_year_return`, and `validation_passed`. `segment_metrics.csv` MUST include `era`, `start`, `end`, `annualized_return`, `max_drawdown`, and `positive_years_pct`.
 
 #### Scenario: CSV files written on full run
 

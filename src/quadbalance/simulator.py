@@ -8,6 +8,7 @@ import pandas as pd
 
 from quadbalance.asset_universe import BASE_CAPITAL, CASH_SYMBOL, MONTHLY_CONTRIBUTION, QDII_SYMBOL, Quadrant
 from quadbalance.config import StrategyConfig
+from quadbalance.execution_friction import ExecutionFrictionProfile, FrictionWindow, validate_friction_profile, window_for_date
 from quadbalance.fees import purchase_fee_rate, redemption_fee_rate
 from quadbalance.instrument_pool import primary_qdii_handoff_date, qdii_pool_for_date
 
@@ -53,6 +54,19 @@ class SimulationEvent:
 
 
 @dataclass
+class ExecutionFrictionMetrics:
+    base_transaction_cost: float = 0.0
+    stressed_transaction_cost: float = 0.0
+    spread_cost: float = 0.0
+    premium_discount_impact: float = 0.0
+    unfilled_subscription_cny: float = 0.0
+    unfilled_redemption_cny: float = 0.0
+    delayed_cash_cny: float = 0.0
+    delayed_cash_days: int = 0
+    target_drift: float = 0.0
+
+
+@dataclass
 class SimulationResult:
     config_id: str
     daily_values: pd.Series
@@ -66,6 +80,7 @@ class SimulationResult:
     qdii_metrics: QdiiExecutionMetrics | None = None
     rebalance_shortfalls: list[RebalanceShortfallEvent] = field(default_factory=list)
     rebalance_metrics: RebalanceExecutionMetrics | None = None
+    execution_friction_metrics: ExecutionFrictionMetrics | None = None
     events: list[SimulationEvent] = field(default_factory=list)
 
 
@@ -77,12 +92,32 @@ class LifecycleResult:
     max_drawdown: float
     depleted: bool
     recovery_days: int
+    requested_withdrawal: float = 0.0
+    paid_withdrawal: float = 0.0
+    unfunded_withdrawal: float = 0.0
+    withdrawal_coverage_ratio: float = 1.0
+    minimum_real_wealth: float = 0.0
+    safe_spending_breached: bool = False
+    forced_sale_amount: float = 0.0
+    underwater_forced_sale_amount: float = 0.0
+    contribution_missed: float = 0.0
+    real_spending_preservation: float = 1.0
+    depletion_date: str | None = None
     events: list[SimulationEvent] = field(default_factory=list)
 
 
 @dataclass
 class _SimContext:
     qdii_backlog: float = 0.0
+    delayed_cash: float = 0.0
+    delayed_cash_days: int = 0
+    friction_drag: float = 0.0
+    spread_drag: float = 0.0
+    premium_drag: float = 0.0
+    base_transaction_cost: float = 0.0
+    stressed_transaction_cost: float = 0.0
+    unfilled_subscription: float = 0.0
+    unfilled_redemption: float = 0.0
     quota_used: dict[str, float] = field(default_factory=dict)
     last_date: pd.Timestamp | None = None
     qdii_intended: float = 0.0
@@ -117,10 +152,12 @@ def _buy(
     amount: float,
     price: float,
     premium: float = 0.0,
+    transaction_cost_multiplier: float = 1.0,
+    spread_bps: float = 0.0,
 ) -> float:
     if amount <= 0 or price <= 0:
         return amount
-    effective_price = price * (1 + premium) * (1 + purchase_fee_rate(symbol))
+    effective_price = price * (1 + premium) * (1 + purchase_fee_rate(symbol) * transaction_cost_multiplier) * (1 + spread_bps / 10000.0)
     buy_shares = amount / effective_price
     shares[symbol] = shares.get(symbol, 0.0) + buy_shares
     return 0.0
@@ -131,10 +168,13 @@ def _sell(
     symbol: str,
     amount: float,
     price: float,
+    transaction_cost_multiplier: float = 1.0,
+    spread_bps: float = 0.0,
+    premium_shock_bps: float = 0.0,
 ) -> float:
     if amount <= 0 or price <= 0:
         return 0.0
-    effective_price = price * (1 - redemption_fee_rate(symbol))
+    effective_price = price * (1 - redemption_fee_rate(symbol) * transaction_cost_multiplier) * (1 - spread_bps / 10000.0) * (1 - premium_shock_bps / 10000.0)
     needed_shares = amount / effective_price
     available = shares.get(symbol, 0.0)
     if needed_shares <= available:
@@ -207,16 +247,18 @@ def _remaining_quota(symbol: str, config: StrategyConfig, ctx: _SimContext) -> f
     return max(0.0, cap - used)
 
 
-def _buy_qdii_with_quota(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, *, count_intended: bool = True) -> float:
+def _buy_qdii_with_quota(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, friction: ExecutionFrictionProfile | None = None, *, count_intended: bool = True) -> float:
     if amount <= 0:
         return 0.0
     if count_intended:
         ctx.qdii_intended += amount
     if not config.enable_qdii_quota or _is_proxy_era(dt):
         if QDII_SYMBOL in day_prices.index:
-            _buy(shares, QDII_SYMBOL, amount, day_prices[QDII_SYMBOL], config.qdii_premium)
-            ctx.qdii_executed += amount
-        return 0.0
+            exec_amount = amount
+            _buy(shares, QDII_SYMBOL, exec_amount, day_prices[QDII_SYMBOL], config.qdii_premium)
+            ctx.qdii_executed += exec_amount
+            return 0.0
+        return amount
     remainder = amount
     pool = _qdii_symbols_for_date(dt, day_prices)
     primary = QDII_SYMBOL
@@ -273,7 +315,7 @@ def _handle_qdii_unfilled(
         )
 
 
-def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp) -> None:
+def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, friction: ExecutionFrictionProfile | None = None) -> None:
     if amount <= 0 or symbol not in day_prices.index:
         return
     if config.is_qdii_symbol(symbol):
@@ -291,7 +333,7 @@ def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_pr
     )
 
 
-def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, dt: pd.Timestamp) -> tuple[float, list[RebalanceShortfallEvent]]:
+def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, dt: pd.Timestamp, friction: ExecutionFrictionProfile | None = None) -> tuple[float, list[RebalanceShortfallEvent]]:
     pool = _qdii_symbols_for_date(dt, day_prices)
     total = _qdii_holdings_value(shares, day_prices, dt)
     if total <= 0 or amount <= 0:
@@ -348,7 +390,7 @@ def _max_quadrant_deviation(shares: dict[str, float], day_prices: pd.Series, con
     return max(abs(q_vals[q] / total - targets[q]) for q in targets)
 
 
-def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, extra_cash: float = 0.0) -> None:
+def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, extra_cash: float = 0.0, friction: ExecutionFrictionProfile | None = None) -> None:
     total = _portfolio_value(shares, day_prices) + extra_cash
     if total <= 0:
         return
@@ -459,7 +501,10 @@ def simulate(
     monthly_contribution: float = MONTHLY_CONTRIBUTION,
     enable_rebalance: bool = True,
     backup_prices: dict[str, pd.Series] | None = None,
+    friction_profile: ExecutionFrictionProfile | None = None,
 ) -> SimulationResult:
+    if friction_profile is not None:
+        validate_friction_profile(friction_profile)
     core_symbols = [s for s in config.symbols() if s in prices.columns]
     sim_prices = prices[core_symbols].dropna(how="any")
     if sim_prices.empty:
@@ -596,22 +641,36 @@ def simulate_lifecycle(
     months = sorted(month_periods.unique())
     interrupted = set(months[:interrupt_months]) if interrupt_months > 0 else set()
 
-    if interrupted:
-        lifecycle.loc[month_periods.isin(interrupted)] = 0.0
-
     lifecycle_events: list[SimulationEvent] = []
+    requested_withdrawal = paid_withdrawal = unfunded_withdrawal = 0.0
+    forced_sale_amount = underwater_forced_sale_amount = 0.0
+    contribution_missed = 0.0
+    safe_spending_breached = False
+    depletion_date: str | None = None
+
+    if interrupted:
+        interruption_mask = month_periods.isin(interrupted)
+        contribution_missed = float((lifecycle.loc[interruption_mask].shift(1).fillna(lifecycle.iloc[0]) - lifecycle.loc[interruption_mask]).abs().sum())
+        lifecycle.loc[interruption_mask] = 0.0
+
     if scenario_id == "one_time_liquidity_20pct" and len(lifecycle) > 0:
         drawdown_mask = lifecycle < lifecycle.cummax()
         if drawdown_mask.any():
             trigger_idx = lifecycle[drawdown_mask].index[0]
         else:
             trigger_idx = lifecycle.index[len(lifecycle) // 2]
+        trigger_value = float(lifecycle.loc[trigger_idx])
         lifecycle.loc[trigger_idx:] = lifecycle.loc[trigger_idx:] * 0.8
+        expense = trigger_value * 0.2
+        requested_withdrawal += expense
+        paid_withdrawal += expense
+        forced_sale_amount += expense
+        underwater_forced_sale_amount += expense if trigger_value < float(lifecycle.cummax().loc[trigger_idx]) else 0.0
         lifecycle_events.append(
             SimulationEvent(
                 date=trigger_idx.strftime("%Y-%m-%d"),
                 event_type="liquidity",
-                cash_amount=float(lifecycle.loc[trigger_idx]) * 0.25,
+                cash_amount=expense,
                 scenario_id=scenario_id,
                 note="one_time_liquidity_20pct",
             )
@@ -637,23 +696,38 @@ def simulate_lifecycle(
                     continue
                 peak = values.cummax()
                 floor = peak * (1 - withdrawal_rate)
+                requested = float(values.iloc[0] * withdrawal_rate)
+                paid = float(min(requested, max(values.iloc[0] - floor.iloc[0], 0.0)))
+                unfunded = max(0.0, requested - paid)
+                requested_withdrawal += requested
+                paid_withdrawal += paid
+                unfunded_withdrawal += unfunded
+                safe_spending_breached = safe_spending_breached or unfunded > 0
+                if values.iloc[0] < peak.iloc[0]:
+                    forced_sale_amount += paid
+                    underwater_forced_sale_amount += paid
                 lifecycle.loc[mask] = values.clip(lower=floor)
                 lifecycle_events.append(
                     SimulationEvent(
                         date=values.index[0].strftime("%Y-%m-%d"),
                         event_type="withdrawal",
-                        cash_amount=float(values.iloc[0] * withdrawal_rate),
+                        cash_amount=requested,
                         weight=withdrawal_rate,
                         scenario_id=scenario_id,
+                        note=f"paid={paid:.2f}; unfunded={unfunded:.2f}",
                     )
                 )
         else:
+            requested = float(lifecycle.iloc[0] * withdrawal_rate)
+            paid = requested
+            requested_withdrawal += requested
+            paid_withdrawal += paid
             lifecycle = lifecycle * max(0.0, 1.0 - withdrawal_rate)
             lifecycle_events.append(
                 SimulationEvent(
                     date=lifecycle.index[0].strftime("%Y-%m-%d"),
                     event_type="withdrawal",
-                    cash_amount=0.0,
+                    cash_amount=requested,
                     weight=withdrawal_rate,
                     scenario_id=scenario_id,
                 )
@@ -662,8 +736,14 @@ def simulate_lifecycle(
     peak = lifecycle.cummax()
     dd = lifecycle / peak - 1
     depleted = bool((lifecycle <= 0).any())
+    if depleted:
+        depletion_idx = lifecycle[lifecycle <= 0].index[0]
+        depletion_date = depletion_idx.strftime("%Y-%m-%d")
     recovery_days = _longest_recovery_days(lifecycle)
     real_terminal_value = float(lifecycle.iloc[-1] / max(peak.iloc[-1], 1.0))
+    withdrawal_coverage_ratio = paid_withdrawal / requested_withdrawal if requested_withdrawal > 0 else 1.0
+    minimum_real_wealth = float((lifecycle / peak).min()) if len(lifecycle) else 0.0
+    real_spending_preservation = withdrawal_coverage_ratio if requested_withdrawal > 0 else 1.0
     return LifecycleResult(
         scenario_id=scenario_id,
         terminal_value=float(lifecycle.iloc[-1]),
@@ -671,6 +751,17 @@ def simulate_lifecycle(
         max_drawdown=float(dd.min()),
         depleted=depleted,
         recovery_days=recovery_days,
+        requested_withdrawal=requested_withdrawal,
+        paid_withdrawal=paid_withdrawal,
+        unfunded_withdrawal=unfunded_withdrawal,
+        withdrawal_coverage_ratio=withdrawal_coverage_ratio,
+        minimum_real_wealth=minimum_real_wealth,
+        safe_spending_breached=safe_spending_breached,
+        forced_sale_amount=forced_sale_amount,
+        underwater_forced_sale_amount=underwater_forced_sale_amount,
+        contribution_missed=contribution_missed,
+        real_spending_preservation=real_spending_preservation,
+        depletion_date=depletion_date,
         events=lifecycle_events,
     )
 
@@ -693,4 +784,6 @@ def _compute_annual_quadrant_returns(prices: pd.DataFrame, config: StrategyConfi
             end_p = year_prices[syms].iloc[-1].mean()
             row[q] = (end_p / start_p - 1) if start_p else 0.0
         rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["stocks", "bonds", "gold", "cash"])
     return pd.DataFrame(rows).set_index("year")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 import pandas as pd
@@ -11,6 +11,7 @@ from quadbalance.config import StrategyConfig
 from quadbalance.instrument_pool import qdii_pool_codes
 from quadbalance.simulator import SimulationResult, simulate
 from quadbalance.stress_scenarios import STRESS_SCENARIOS
+from quadbalance.stress_thresholds import DEFAULT_STRESS_THRESHOLDS
 
 
 @dataclass
@@ -20,6 +21,14 @@ class StressResult:
     portfolio_return: float
     worst_quadrant_shock: float
     passed: bool
+    classification: str = "normal"
+    threshold_reasons: list[str] = field(default_factory=list)
+    threshold_basis: str = "portfolio_return"
+    duration_days: int = 0
+    liquidity_impairment_days: int = 0
+    concurrent_drawdown_count: int = 0
+    hedge_failure_days: int = 0
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,7 +47,19 @@ class StressMode(str, Enum):
 
 S4_CUMULATIVE_FLOOR = -0.10
 FAST_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid in {"S1", "S2", "S3", "S6"}}
+MECHANISM_STRESS_SCENARIOS = {"S14", "S15", "S16", "S17", "S18", "S19", "S20", "S21"}
 FULL_STRESS_SCENARIOS = {sid for sid in STRESS_SCENARIOS if sid not in FAST_STRESS_SCENARIOS} | {"S5", "S7"}
+
+MECHANISM_STRESS_NOTES: dict[str, list[str]] = {
+    "S14": ["all defensive quadrants lose hedge value", "cash is haircut for real purchasing-power erosion"],
+    "S15": ["rebalancing buy orders are delayed", "target underweights cannot be corrected for one quarter"],
+    "S16": ["QDII sleeve suffers equity drawdown, FX reversal, premium compression, and quota scarcity"],
+    "S17": ["nominal drawdown can look mild while real wealth is impaired", "persistent inflation taxes cash and bonds"],
+    "S18": ["large initial deployment is followed by a front-loaded crash", "monthly contributions have limited averaging power"],
+    "S19": ["bond fund faces redemption pressure and liquidity discount", "bond sleeve is not treated as risk-free"],
+    "S20": ["cash-like fund liquidity is impaired", "real cash return is negative under inflation"],
+    "S21": ["investor capitulates after deep drawdown", "discipline failure adds a behavioral haircut"],
+}
 
 
 def _median_quadrant_returns(annual_q: pd.DataFrame) -> dict[str, float]:
@@ -130,6 +151,66 @@ def run_s4_path_test(
     return S4PathResult(years, cumulative, worst_year, window_ann, passed)
 
 
+def _classify_stress_result(result: StressResult, metric_value: float | None = None) -> StressResult:
+    threshold = DEFAULT_STRESS_THRESHOLDS.get(result.scenario_id)
+    if threshold is None or metric_value is None:
+        return result
+    classification, reasons = threshold.classify(metric_value)
+    return replace(result, classification=classification, threshold_reasons=reasons, threshold_basis=threshold.metric_type)
+
+
+def _persistent_liquidity_result(config: StrategyConfig, sim_result: SimulationResult) -> StressResult:
+    medians = _median_quadrant_returns(sim_result.annual_quadrant_returns)
+    stressed = dict(medians)
+    stressed.update({"stocks": -0.16, "bonds": -0.09, "gold": -0.05, "cash": -0.01})
+    port_ret = _portfolio_return_from_quadrants(config, stressed)
+    notes = ["correlation convergence across defensive assets", "liquidity drag persists across multiple periods"]
+    concurrent = sum(1 for q in ("stocks", "bonds", "gold") if stressed.get(q, 0.0) < 0)
+    hedge_failure = 1 if stressed["stocks"] < 0 and (stressed["bonds"] < 0 or stressed["gold"] < 0) else 0
+    result = StressResult(
+        "S13",
+        "Persistent correlation/liquidity stress",
+        port_ret,
+        abs(min(stressed.values())),
+        port_ret > -0.15,
+        duration_days=252 * 2,
+        liquidity_impairment_days=252,
+        concurrent_drawdown_count=concurrent,
+        hedge_failure_days=hedge_failure * 252,
+        notes=notes,
+    )
+    return _classify_stress_result(result, port_ret)
+
+
+def _mechanism_stress_result(config: StrategyConfig, scenario_id: str) -> StressResult:
+    name, shocks = STRESS_SCENARIOS[scenario_id]
+    port_ret = _portfolio_return_from_quadrants(config, shocks)
+    friction = {
+        "S15": 0.03,
+        "S16": config.qdii_target_weight() * 0.10 + 0.02,
+        "S18": 0.04,
+        "S19": config.bonds * 0.03,
+        "S20": config.cash * 0.04,
+        "S21": 0.06,
+    }.get(scenario_id, 0.0)
+    stressed_return = port_ret - friction
+    concurrent = sum(1 for q in ("stocks", "bonds", "gold", "cash") if shocks.get(q, 0.0) < 0)
+    hedge_failure = 1 if shocks.get("stocks", 0.0) < 0 and (shocks.get("bonds", 0.0) < 0 or shocks.get("gold", 0.0) < 0) else 0
+    result = StressResult(
+        scenario_id,
+        name,
+        stressed_return,
+        _worst_shock(shocks),
+        stressed_return > -0.18,
+        duration_days=252 if scenario_id in {"S15", "S16", "S20", "S21"} else 252 * 2,
+        liquidity_impairment_days=63 if scenario_id in {"S15", "S16", "S19", "S20"} else 0,
+        concurrent_drawdown_count=concurrent,
+        hedge_failure_days=hedge_failure * 126,
+        notes=MECHANISM_STRESS_NOTES.get(scenario_id, []),
+    )
+    return _classify_stress_result(result, stressed_return)
+
+
 def run_fast_stress_tests(config: StrategyConfig, sim_result: SimulationResult) -> list[StressResult]:
     medians = _median_quadrant_returns(sim_result.annual_quadrant_returns)
     results: list[StressResult] = []
@@ -140,7 +221,9 @@ def run_fast_stress_tests(config: StrategyConfig, sim_result: SimulationResult) 
         port_ret = _portfolio_return_from_quadrants(config, q_returns)
         worst = _worst_shock(shocks)
         passed = port_ret >= -worst
-        results.append(StressResult(sid, name, port_ret, worst, passed))
+        result = StressResult(sid, name, port_ret, worst, passed, notes=["one-time shock" if sid != "S9" else "global liquidity shock"])
+        results.append(_classify_stress_result(result, port_ret))
+    results.append(_persistent_liquidity_result(config, sim_result))
     return results
 
 
@@ -148,7 +231,7 @@ def _approximate_s5_result(config: StrategyConfig, sim_result: SimulationResult,
     qdii_fill = sim_result.qdii_metrics.qdii_fill_rate if sim_result.qdii_metrics else 1.0
     qdii_gap = abs(sim_result.qdii_metrics.avg_qdii_weight_gap) if sim_result.qdii_metrics else 0.0
     impact = -(config.qdii_premium * max(0.0, 1.0 - qdii_fill)) - (qdii_gap * 0.5)
-    return StressResult("S5", "QDII premium (approximate impact vs baseline)", impact, 0.05, impact > -0.10)
+    return StressResult("S5", "QDII premium (approximate impact vs baseline)", impact, 0.05, impact > -0.10, notes=["approximate"])
 
 
 def _approximate_s7_result(config: StrategyConfig, sim_result: SimulationResult, baseline_ret: float) -> StressResult:
@@ -172,7 +255,9 @@ def run_full_stress_tests(
     results = [sr for sr in run_fast_stress_tests(config, sim_result) if sr.scenario_id != "S4"]
     baseline_ret = sim_result.daily_values.iloc[-1] / sim_result.daily_values.iloc[0] - 1
     for sid in sorted(FULL_STRESS_SCENARIOS):
-        if sid == "S5" and include_s5:
+        if sid in MECHANISM_STRESS_SCENARIOS:
+            results.append(_mechanism_stress_result(config, sid))
+        elif sid == "S5" and include_s5:
             if mode == StressMode.exploratory:
                 results.append(_approximate_s5_result(config, sim_result, baseline_ret))
             else:
@@ -180,7 +265,8 @@ def run_full_stress_tests(
                 s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
                 s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
                 s5_impact = s5_ret - baseline_ret
-                results.append(StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10))
+                result = StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10)
+                results.append(_classify_stress_result(result, s5_impact))
         elif sid == "S7" and include_s7:
             if mode == StressMode.exploratory:
                 results.append(_approximate_s7_result(config, sim_result, baseline_ret))
@@ -191,10 +277,16 @@ def run_full_stress_tests(
                 s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
                 s7_impact = s7_ret - baseline_ret
                 s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
-                results.append(StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True))
+                result = StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True)
+                result = replace(result, threshold_basis="impact_vs_baseline")
+                results.append(_classify_stress_result(result, s7_impact))
     s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices, mode=mode) if include_s4 else None
     if s4_path is not None:
-        results.append(StressResult("S4", f"Prolonged low rates ({len(s4_path.window_years)}yr path)", s4_path.cumulative_return, 0.02, s4_path.passed))
+        result = StressResult("S4", f"Prolonged low rates ({len(s4_path.window_years)}yr path)", s4_path.cumulative_return, 0.02, s4_path.passed, threshold_basis="cumulative_return")
+        result = _classify_stress_result(result, s4_path.cumulative_return)
+        if s4_path.worst_year_return < DEFAULT_STRESS_THRESHOLDS["S4"].fail:
+            result = replace(result, threshold_reasons=result.threshold_reasons + [f"worst_year_return {s4_path.worst_year_return:.2%} breaches fail floor"])
+        results.append(result)
     return results, s4_path
 
 

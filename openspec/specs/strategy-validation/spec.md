@@ -70,7 +70,9 @@ The backtest report SHALL include a per-calendar-year table showing return of ea
 
 ### Requirement: Stress test scenarios
 
-The validation suite MUST include seven stress scenarios applied to the locked candidate configuration:
+The validation suite MUST include short-horizon stress scenarios applied to the locked candidate configuration.
+
+The scenario set MUST include at minimum:
 
 | ID | Scenario | Parameters |
 |----|----------|------------|
@@ -78,9 +80,23 @@ The validation suite MUST include seven stress scenarios applied to the locked c
 | S2 | Stock-bond dual kill | Stocks -20%, Bonds 0%, Gold +10%, Cash +2% |
 | S3 | CNY depreciation | CNY -10% vs USD; Gold +8%, QDII Stocks +12% (USD terms), domestic assets flat in CNY |
 | S4 | Prolonged low rates | Bonds annual return capped at 2% for 5 consecutive calendar years (path simulation) |
-| S5 | QDII premium | 513500 purchases at 5% premium to NAV on every buy |
+| S5 | QDII premium | QDII purchases at 5% premium to NAV on every buy |
 | S6 | Gold crash | Gold -20% in one year, other quadrants at historical median |
-| S7 | Prolonged low QDII quota | QDII daily cap reduced to 10 CNY for entire simulation |
+| S7 | Prolonged low QDII quota | QDII daily cap reduced to 10 CNY for the simulation window |
+| S8 | Stagflation | Stocks -20%, Bonds -8%, Gold +5%, Cash +2%, CPI +6% |
+| S9 | Global liquidity shock | Stocks -30%, Bonds -5%, Gold -10%, Cash +1%, QDII daily cap reduced to 10 CNY |
+| S10 | CNY appreciation | CNY +10% vs USD; QDII stocks and gold flat in USD terms, domestic assets flat in CNY |
+| S11 | Domestic inflation shock | CPI +8%, Stocks -10%, Bonds -8%, Gold +5%, Cash +2% |
+| S12 | Multi-year quadrant stagnation | Stocks, Bonds, Gold, and Cash each fail to exceed CPI for 5 consecutive years |
+| S13 | Persistent correlation/liquidity stress | Correlated defensive-asset drawdown with extended liquidity impairment |
+| S14 | Quad hedge failure | All defensive quadrants lose hedge value and cash is haircut for inflation |
+| S15 | Rebalance lockout | Rebalancing buys are delayed for one quarter |
+| S16 | QDII FX/premium/quota triple shock | QDII suffers equity drawdown, FX reversal, premium compression, and quota scarcity |
+| S17 | Silent inflation confiscation | Nominal drawdown can look mild while real wealth is impaired |
+| S18 | Front-loaded crash after deployment | Large initial deployment is followed by a front-loaded crash |
+| S19 | Bond fund redemption spiral | Bond fund faces redemption pressure and liquidity discount |
+| S20 | Cash liquidity and inflation erosion | Cash-like fund liquidity is impaired and real cash return is negative |
+| S21 | Behavioral capitulation | Investor capitulates after deep drawdown |
 
 #### Scenario: Stress scenario S1 applied
 
@@ -104,7 +120,7 @@ The validation suite MUST include seven stress scenarios applied to the locked c
 #### Scenario: Stress scenario S5 QDII premium
 
 - **WHEN** stress scenario S5 is applied
-- **THEN** every 513500 purchase in simulation pays 5% above NAV
+- **THEN** every QDII purchase in simulation pays 5% above NAV
 - **AND** the report shows impact on total return vs baseline
 
 #### Scenario: Stress scenario S7 low QDII quota
@@ -112,6 +128,12 @@ The validation suite MUST include seven stress scenarios applied to the locked c
 - **WHEN** stress scenario S7 is applied
 - **THEN** every QDII purchase attempt uses a 10 CNY daily cap
 - **AND** the report shows delta in total return and QDII fill rate vs baseline
+
+#### Scenario: Long-term regime stress runs for locked configuration
+
+- **WHEN** a configuration passes primary validation and is selected for strategy lock
+- **THEN** the validation suite runs LT1, LT2, and LT3 for that locked configuration
+- **AND** the results are available to the strategy lock document generator
 
 ### Requirement: QDII execution quality in validation output
 
@@ -159,7 +181,7 @@ A candidate configuration SHALL pass validation and become eligible for strategy
 
 1. Maximum drawdown ≤ 25%
 2. No single calendar year portfolio return below -20%
-3. In every stress scenario S1–S6, portfolio drawdown is less than the worst single-quadrant shock input
+3. In every stress scenario S1–S7, portfolio drawdown is less than the worst single-quadrant shock input
 4. Annualized return exceeds cash-only benchmark (511880) by at least 2%
 5. Annualized return is not more than 2% below the 60/40 benchmark, OR max drawdown is at least 5% lower than the 60/40 benchmark
 
@@ -244,6 +266,7 @@ The metrics MUST include:
 5. Longest underwater duration measured from peak to full recovery.
 6. Count of rolling 3-year and 5-year windows underperforming cash-only benchmark.
 7. Count of rolling 3-year and 5-year windows underperforming 60/40 benchmark.
+8. NAV recovery time or explicit unrecovered state.
 
 #### Scenario: Real-return metrics included in output
 
@@ -346,7 +369,11 @@ The governance policy MUST include:
 
 ### Requirement: Strategy lock document
 
-When a configuration passes validation, the system SHALL produce a strategy lock document containing: locked date, final allocation weights, primary instruments per quadrant, stocks sub-split (60/40), DCA method, rebalancing threshold, backtest period, all six core metrics, stress test summary, strategy boundary summary, and governance policy. The document MUST include a disclaimer that historical performance does not guarantee future results.
+When a configuration passes validation, the system SHALL produce a strategy lock document containing: locked date, final allocation weights, primary instruments per quadrant, stocks sub-split (60/40), DCA method, rebalancing threshold, backtest period, all six core metrics, stress test summary, strategy boundary summary, governance policy, QDII execution summary, and long-term macro regime stress summary when available. The document MUST include a disclaimer that historical performance does not guarantee future results.
+
+The lock document MUST render the stress summary with stable section headers matching the reporting helpers, including: `Stress Test Summary`, `Long-Term Macro Regime Stress`, `Risk Map Summary`, `Risk Overview Panel`, `One-Page Risk Summary`, `Dynamic Path Stress Tests`, `Behavioral Stress Rules`, `Cross-Border Access and Settlement Stress`, `Product-Level Risk`, and `Robustness and Valuation-Start Risk` when those inputs are present.
+
+When a recovery-time metric is included, unrecovered paths MUST be rendered explicitly as `Unrecovered within test window` rather than assigned a synthetic duration.
 
 #### Scenario: Lock document generated on pass
 
@@ -458,7 +485,7 @@ When multiple configurations pass primary validation, the strategy lock process 
 
 When a configuration is selected for strategy lock, the validation suite SHALL run long-term macro regime stress scenarios for the locked configuration after primary sweep validation and short-horizon stress validation complete.
 
-Long-term macro regime stress results MUST be reported separately from S1-S12 short-horizon and execution-friction stress tests. Long-term regime results MUST NOT silently change the selected allocation, but they MUST be included in the strategy boundary and governance evidence for the locked strategy.
+Long-term macro regime stress results MUST be reported separately from S1-S21 short-horizon and execution-friction stress tests. Long-term regime results MUST NOT silently change the selected allocation, but they MUST be included in the strategy boundary and governance evidence for the locked strategy.
 
 #### Scenario: Long-term regime stress runs for locked configuration
 
@@ -471,6 +498,24 @@ Long-term macro regime stress results MUST be reported separately from S1-S12 sh
 - **WHEN** multiple configurations pass primary validation
 - **THEN** long-term macro regime stress is not run for every sweep candidate by default
 - **AND** the selected locked allocation is not silently changed based on LT1-LT3 results
+
+### Requirement: Long-term macro regime reporting in strategy lock document
+
+The strategy lock document SHALL include a `Long-Term Macro Regime Stress` section when long-term scenario results are available.
+
+The section MUST include for each long-term scenario: ID, scenario name, horizon, nominal annualized return, real annualized return, maximum drawdown, longest underwater duration, purchasing-power preservation status, governance classification, and key threshold reasons.
+
+#### Scenario: Strategy lock includes long-term summary
+
+- **WHEN** LT1-LT3 complete for the locked configuration
+- **THEN** `strategy-lock.md` includes a `Long-Term Macro Regime Stress` section
+- **AND** each scenario row shows real-return, drawdown, underwater, purchasing-power, and governance classification fields
+
+#### Scenario: Thesis-broken long-term regime is highlighted
+
+- **WHEN** any long-term scenario is classified as `thesis-broken`
+- **THEN** the strategy boundary summary includes the long-term regime classification
+- **AND** the governance policy states that allocation redesign requires a new validation run rather than automatic parameter chasing
 
 ### Requirement: Long-term macro regime reporting in strategy lock document
 
