@@ -181,23 +181,232 @@ A candidate configuration SHALL pass validation and become eligible for strategy
 
 1. Maximum drawdown ≤ 25%
 2. No single calendar year portfolio return below -20%
-3. In every stress scenario S1–S7, portfolio drawdown is less than the worst single-quadrant shock input
+3. Hard stress gates: no short-horizon, path, behavior, cross-border, or product-risk result classified `fail` or `thesis-broken` (including S1–S7 portfolio-vs-worst-quadrant checks where applicable). Results classified `review-required` do not fail this gate; they MUST be recorded as `needs_review`
 4. Annualized return exceeds cash-only benchmark (511880) by at least 2%
 5. Annualized return is not more than 2% below the 60/40 benchmark, OR max drawdown is at least 5% lower than the 60/40 benchmark
+
+NAV recovery constraints that the implementation already applies as Criterion 3 hard gates remain hard failures when breached.
 
 #### Scenario: Configuration passes all criteria
 
 - **WHEN** a candidate achieves 10% annualized return, 18% max drawdown, worst year -12%
-- **AND** all stress scenarios show portfolio outperforming worst single-quadrant shock
+- **AND** no stress-family result is `fail` or `thesis-broken`
 - **AND** return exceeds cash benchmark by 3%
 - **AND** max drawdown is 8% lower than 60/40 benchmark
 - **THEN** the configuration is marked "validation passed"
+- **AND** any `review-required` findings appear only under `needs_review`
 
 #### Scenario: Configuration fails drawdown criterion
 
 - **WHEN** a candidate achieves 12% annualized return but 30% max drawdown
 - **THEN** the configuration is marked "validation failed"
 - **AND** the failure reason cites criterion 1 (max drawdown > 25%)
+
+#### Scenario: Configuration fails only on thesis-broken extended stress
+
+- **WHEN** a candidate meets metrics gates 1, 2, 4, and 5
+- **AND** a cross-border or extended stress result is `thesis-broken`
+- **THEN** the configuration is marked "validation failed"
+- **AND** the failure reason cites that stress result
+
+### Requirement: Review-required findings do not fail acceptance
+
+Acceptance evaluation SHALL distinguish hard failures from review-required findings. A candidate MUST NOT fail `validation.passed` solely because a short-horizon stress, path stress, behavior stress, cross-border stress, or product-risk result is classified `review-required`. Those findings MUST be recorded on a dedicated `needs_review` list (or equivalent) and MUST appear in sweep output and the strategy lock document. A candidate MUST fail when any such result is classified `fail` or `thesis-broken`, subject to the same primary metrics gates (drawdown, worst year, NAV recovery, return vs cash and 60/40).
+
+#### Scenario: Review-required stress does not block pass
+
+- **WHEN** a candidate meets primary metrics gates
+- **AND** all stress / path / behavior / cross-border / product-risk results are either `normal` or `review-required`
+- **AND** none are `fail` or `thesis-broken`
+- **THEN** the configuration is marked validation passed
+- **AND** each `review-required` finding is listed in `needs_review`
+- **AND** `failure_reasons` does not include those review-required findings
+
+#### Scenario: Thesis-broken stress still blocks pass
+
+- **WHEN** a candidate meets primary metrics gates
+- **AND** any stress / path / behavior / cross-border / product-risk result is classified `fail` or `thesis-broken`
+- **THEN** the configuration is marked validation failed
+- **AND** the failure reason cites that scenario or boundary
+
+#### Scenario: Sweep CSV exposes needs_review
+
+- **WHEN** a sweep row is written for a deep-validated configuration with review-required findings
+- **THEN** the row includes a `needs_review` field listing those findings
+- **AND** `validation_passed` may still be true when `failure_reasons` is empty
+
+### Requirement: Outcome-based cross-border stress classification
+
+Cross-border stress classification SHALL be based on measured portfolio outcomes for the candidate configuration. Scenario-definition parameters that are fixed for a scenario (including liquidity impairment months and capital mobility constraint months) MAY annotate reasons and MAY contribute to a `review-required` classification, but MUST NOT alone force `thesis-broken`. `thesis-broken` MUST require at least one outcome breach such as portfolio return below the severe return threshold or frozen external-asset weight at or above the severe frozen-weight threshold.
+
+#### Scenario: CB3 is not automatically thesis-broken
+
+- **WHEN** CB3 is evaluated for a configuration whose portfolio return is above the severe return threshold
+- **AND** frozen external-asset weight is below the severe frozen-weight threshold
+- **THEN** CB3 is classified `review-required` or `normal`, not `thesis-broken`
+- **AND** prolonged impairment months may still be listed in reasons
+
+#### Scenario: Severe frozen weight still thesis-broken
+
+- **WHEN** a cross-border scenario yields frozen external-asset weight at or above the severe frozen-weight threshold
+- **THEN** the scenario is classified `thesis-broken`
+- **AND** acceptance marks the configuration failed when that result is included in evaluation
+
+### Requirement: Correlation convergence and pseudo-diversification stress
+
+The validation suite SHALL include a dedicated stress family that tests whether defensive quadrants fail together over an extended window after an initial diversification benefit disappears. This family is intended to capture the gap between ordinary market shocks and the failure of a supposedly diversified defensive mix when correlations rise.
+
+The scenario family MUST report nominal portfolio return, CPI-adjusted return, maximum drawdown, longest underwater duration, and whether the portfolio preserved purchasing power over the full window.
+
+The stress family MUST include at minimum:
+
+| ID | Scenario | Parameters |
+|----|----------|------------|
+| S22 | Correlation convergence | Stocks, Bonds, Gold, and Cash all move toward the same negative return profile over a multi-year window |
+| S23 | Defensive-asset co-crash | Bonds and Gold fall alongside Stocks while Cash real return is negative |
+| S24 | Recovery-friction prolongation | Initial drawdown is followed by slow, uneven recovery that extends underwater duration materially |
+
+#### Scenario: Correlation convergence stress is reported
+
+- **WHEN** S22 is executed on a locked configuration
+- **THEN** the report shows nominal return, CPI-adjusted return, max drawdown, and underwater duration
+- **AND** marks the scenario as review-required or thesis-broken if all defensive quadrants lose diversification benefit simultaneously
+- **AND** includes a reason when the result is materially worse than the baseline S13 persistent-correlation case
+
+#### Scenario: Defensive-asset co-crash is reported
+
+- **WHEN** S23 is executed on a locked configuration
+- **THEN** the report shows whether Bonds, Gold, and Cash all contribute negatively in real terms
+- **AND** the report explains whether the portfolio relied on pseudo-diversification that failed under stress
+- **AND** the report identifies the dominant failing quadrant pair or trio when available
+
+#### Scenario: Recovery-friction prolongation is reported
+
+- **WHEN** S24 is executed on a locked configuration
+- **THEN** the report shows the extended underwater duration relative to the baseline backtest
+- **AND** the scenario is flagged if recovery time increases materially even when terminal return is acceptable
+- **AND** the report distinguishes nominal recovery from real-value recovery
+
+### Requirement: Cross-border execution and FX-rebalance interaction stress
+
+The validation suite SHALL include explicit stress cases for cross-border execution friction that combine FX movement, QDII quota scarcity, premium/discount widening, and delayed rebalancing. These tests MUST be reported separately from short-horizon market shocks and MUST be traceable to the same QDII execution metrics used in the main validation report.
+
+The scenario family MUST include at minimum:
+
+| ID | Scenario | Parameters |
+|----|----------|------------|
+| S25 | QDII routing delay | QDII purchases are delayed by one or more rebalancing cycles |
+| S26 | FX plus quota squeeze | QDII faces adverse FX movement plus reduced daily cap and elevated premium |
+| S27 | Rebalance under cross-border stress | Rebalancing must restore target weights while cross-border execution is partially unavailable |
+
+#### Scenario: QDII routing delay is reported
+
+- **WHEN** S25 is executed on the locked configuration
+- **THEN** the report shows impact on actual QDII fill rate, pending cash, average QDII weight gap, and total return
+- **AND** identifies whether delayed routing causes material target-weight drift
+
+#### Scenario: FX plus quota squeeze is reported
+
+- **WHEN** S26 is executed on the locked configuration
+- **THEN** the report shows the combined impact of FX movement, quota scarcity, and premium compression
+- **AND** marks the scenario as thesis-broken if QDII exposure cannot be maintained through the stress window
+- **AND** highlights whether the failure is driven primarily by FX, premium, quota, or delayed routing
+
+#### Scenario: Rebalance under cross-border stress is reported
+
+- **WHEN** S27 is executed on the locked configuration
+- **THEN** the report shows whether rebalancing restores target allocations within the tolerance band
+- **AND** the report notes any forced cash buildup or persistent underweighting of the QDII sleeve
+- **AND** records any remaining drift after the final rebalance cycle
+
+### Requirement: Product-concentration escalation in boundary reporting
+
+The validation suite SHALL elevate product-concentration risk to a first-class validation boundary when a single sleeve or instrument accounts for a disproportionate share of implementation fragility. The boundary report MUST include the largest product-level contributor, its classification, and the reason the concentration is material. This requirement exists because a portfolio can look diversified at quadrant level while still being fragile at the fund-selection level.
+
+#### Scenario: Concentrated sleeve is highlighted
+
+- **WHEN** one product has a review-required or thesis-broken product-risk classification
+- **THEN** the boundary report identifies that product as the dominant implementation risk
+- **AND** explains whether the issue is concentration, liquidity, quota, valuation, or substitution risk
+- **AND** links the finding back to the product-risk summary used by validation
+
+### Requirement: Real-value preservation and recovery-time sensitivity reporting
+
+The validation suite SHALL report nominal and CPI-adjusted outcomes together for all drawdown-heavy stress cases and path-dependent scenarios. The report MUST explicitly distinguish a strategy that recovers nominally from one that preserves purchasing power and recovers in acceptable time. This requirement is especially important for scenarios where bond, cash, or QDII sleeves appear stable in nominal terms but fail in real terms.
+
+#### Scenario: Real-value preservation failure is reported
+
+- **WHEN** a stress scenario has acceptable nominal return but negative real return
+- **THEN** the report classifies the scenario as review-required at minimum
+- **AND** includes the worst real-return window and longest underwater duration
+- **AND** states whether cash-like or defensive sleeves were the source of real-value erosion
+
+#### Scenario: Slow recovery is reported separately from terminal return
+
+- **WHEN** a scenario produces acceptable terminal wealth but materially longer recovery time than baseline
+- **THEN** the report marks recovery friction as a separate reason
+- **AND** the strategy lock document includes the recovery-time sensitivity note
+- **AND** the report compares underwater duration against the baseline backtest
+
+### Requirement: Validation output includes uncovered risk summary
+
+The strategy validation report SHALL include a short “uncovered risk summary” section listing scenario IDs and risk themes that remain under active review after the standard S1-S21 suite completes. This section MUST not change pass/fail outcomes by itself, but it MUST be visible in the locked strategy artifacts.
+
+#### Scenario: Uncovered risk summary is emitted
+
+- **WHEN** the validation suite finishes for a locked configuration
+- **THEN** the output contains a summary of any newly added drawdown and stress-gap scenarios
+- **AND** the summary names the risk themes they are intended to cover
+
+### Requirement: Screening gate thresholds
+
+The screening gate SHALL be defined using fast-to-compute thresholds derived from core metrics.
+
+#### Scenario: Minimum screening conditions
+
+- **WHEN** a candidate is screened
+- **THEN** the screening gate SHALL evaluate at minimum real annualized return, max drawdown, and real terminal wealth
+- **AND** candidates failing any of those thresholds SHALL not proceed to deep validation
+
+### Requirement: Reusable precomputed intermediates
+
+The sweep SHALL reuse precomputed market and benchmark intermediates across candidates within a single run.
+
+#### Scenario: Multiple candidates share the same data slice
+
+- **WHEN** multiple candidates use the same market history and benchmark series
+- **THEN** the implementation SHALL compute invariant series once and reuse them for candidate evaluation
+- **AND** repeated candidate evaluation SHALL NOT re-fetch or re-transform the same data unnecessarily
+
+### Requirement: Ranked deep validation subset
+
+The sweep SHALL support ranking candidates by a lightweight score before running deep validation, so that the most promising configurations are validated first.
+
+#### Scenario: Many candidates remain after screening
+
+- **WHEN** more candidates pass screening than are practical to fully validate within a reasonable time budget
+- **THEN** the sweep SHALL prioritize deep validation for higher-ranked candidates first
+- **AND** the ranking SHALL be derived from fast-to-compute metrics only
+
+### Requirement: Deep validation budget
+
+The sweep SHALL support a configurable budget for deep validation when the screened candidate set is large.
+
+#### Scenario: Screened candidate set exceeds budget
+
+- **WHEN** the number of screened candidates exceeds the deep validation budget
+- **THEN** the sweep SHALL validate only the top-ranked candidates within the budget first
+- **AND** the remaining candidates SHALL be deferred without changing the final selection rule for the validated set
+
+### Requirement: Deterministic final lock selection
+
+The optimization changes SHALL NOT alter which configuration is selected as the final lock when the same set of candidates reaches deep validation.
+
+#### Scenario: Two runs over the same data
+
+- **WHEN** the sweep runs twice over the same inputs
+- **THEN** the final locked configuration and acceptance output SHALL remain deterministic
+- **AND** the ordering of deep validation execution SHALL NOT affect the final selection
 
 ### Requirement: Strategy failure boundary assessment
 
@@ -481,11 +690,46 @@ When multiple configurations pass primary validation, the strategy lock process 
 - **THEN** the lock document states that the locked configuration is mechanically valid
 - **AND** lists profile-specific suitability classifications without claiming that the strategy is suitable for all investors
 
+### Requirement: Staged sweep evaluation pipeline
+
+The backtest engine MUST evaluate sweep candidates in stages so that more expensive analyses run only after cheaper gates succeed for that candidate.
+
+Required stage order for each sweep candidate:
+
+1. Historical portfolio simulation and core performance metrics.
+2. Short-horizon / execution stress evaluation (S1–S21 family and related path tests used by acceptance).
+3. Acceptance evaluation used for sweep pass/fail and lock ranking.
+
+Long-term macro regime stress (LT1–LT3) MUST NOT run in the per-candidate deep path by default. It MUST run only after a configuration is selected for strategy lock, and only if that configuration has already completed primary validation including short-horizon stress.
+
+Each sweep result row MUST record a validation stage that distinguishes at least screened-out candidates from deep-validated candidates.
+
+#### Scenario: Failed metric screen skips stress and long-term
+
+- **WHEN** a candidate fails the early metric screen
+- **THEN** the engine does not run short-horizon stress for that candidate
+- **AND** the engine does not run LT1–LT3 for that candidate
+- **AND** the sweep row records a screened-out validation stage
+
+#### Scenario: Deep-validated candidates skip per-candidate long-term
+
+- **WHEN** a candidate passes the early metric screen and completes short-horizon stress plus acceptance evaluation
+- **THEN** the sweep row is marked deep-validated
+- **AND** LT1–LT3 are not executed as part of that candidate's worker evaluation by default
+
+#### Scenario: Locked configuration receives long-term after stress
+
+- **WHEN** at least one configuration passes primary validation and is selected for strategy lock
+- **THEN** the engine runs LT1–LT3 for that locked configuration after short-horizon stress validation for it has completed
+- **AND** the long-term results are attached before strategy-lock document generation
+
 ### Requirement: Long-term macro regime stress in strategy validation
 
 When a configuration is selected for strategy lock, the validation suite SHALL run long-term macro regime stress scenarios for the locked configuration after primary sweep validation and short-horizon stress validation complete.
 
 Long-term macro regime stress results MUST be reported separately from S1-S21 short-horizon and execution-friction stress tests. Long-term regime results MUST NOT silently change the selected allocation, but they MUST be included in the strategy boundary and governance evidence for the locked strategy.
+
+The sweep MUST NOT run LT1–LT3 for every deep-validated candidate by default. Long-term scenarios are a lock-path governance analysis, not a per-candidate ranking input.
 
 #### Scenario: Long-term regime stress runs for locked configuration
 
@@ -498,6 +742,12 @@ Long-term macro regime stress results MUST be reported separately from S1-S21 sh
 - **WHEN** multiple configurations pass primary validation
 - **THEN** long-term macro regime stress is not run for every sweep candidate by default
 - **AND** the selected locked allocation is not silently changed based on LT1-LT3 results
+
+#### Scenario: Long-term is deferred until lock selection
+
+- **WHEN** the parameter sweep evaluates the full candidate grid
+- **THEN** worker evaluation for non-locked candidates omits LT1–LT3 by default
+- **AND** LT1–LT3 execute at most once for the selected locked configuration in a normal sweep run
 
 ### Requirement: Long-term macro regime reporting in strategy lock document
 
@@ -553,3 +803,70 @@ The artifacts MUST include a tabular summary of scenario metrics and SHOULD incl
 - **THEN** the artifact records the 30-year horizon and annual assumptions for Stocks, Bonds, Gold, Cash, and CPI
 - **AND** records any QDII or currency friction assumption used by the scenario
 
+
+### Requirement: Low QDII quota stress scenario
+
+The validation suite MUST include stress scenario S7: prolonged QDII low quota. Parameters: primary QDII daily cap reduced to 10 CNY for the entire simulation period. The scenario SHALL report impact on total return and QDII fill rate vs baseline.
+
+#### Scenario: S7 low quota stress applied
+
+- **WHEN** stress scenario S7 is executed on the candidate configuration
+- **THEN** every QDII purchase attempt uses a 10 CNY daily cap
+- **AND** the report shows delta in annualized return and QDII fill rate vs baseline
+
+
+
+
+
+
+### Requirement: S4 window-scoped evaluation mode
+The system SHALL provide an explicit S4 evaluation mode that can choose between full-history exact path simulation and window-scoped path simulation. The selected mode SHALL be recorded with the S4 result.
+
+#### Scenario: Full-history S4 preserves existing semantics
+- **WHEN** S4 runs in full-history mode
+- **THEN** the system applies the prolonged low-rate bond cap over the selected window within the full price history
+- **AND** runs a full simulation before calculating the window cumulative return and pass/fail result
+
+#### Scenario: Window-scoped S4 avoids full-history simulation
+- **WHEN** S4 runs in window-scoped mode
+- **THEN** the system evaluates only the selected S4 window price data
+- **AND** calculates cumulative return, worst-year return, annualized window return, and pass/fail result from that window-scoped simulation
+- **AND** the result indicates that window-scoped semantics were used
+
+
+
+
+
+
+### Requirement: Approximate exploratory S5 and S7 stress
+The system SHALL support an approximate stress mode for exploratory sweep screening. Approximate S5 and S7 stress SHALL estimate QDII premium and low-quota impact from existing simulation outputs without requiring full stress reruns, while exact stress SHALL remain the default for final validation.
+
+#### Scenario: Approximate S5 avoids rerun
+- **WHEN** exploratory stress mode is approximate
+- **THEN** S5 QDII premium impact is estimated from existing portfolio exposure or QDII metrics
+- **AND** the system does not rerun the full simulation solely for S5 during broad screening
+
+#### Scenario: Approximate S7 avoids rerun
+- **WHEN** exploratory stress mode is approximate
+- **THEN** S7 low-quota impact is estimated from existing QDII fill, weight-gap, pending-cash, or related execution metrics
+- **AND** the system does not rerun the full simulation solely for S7 during broad screening
+
+#### Scenario: Exact final stress overrides exploratory approximation
+- **WHEN** a candidate is selected for final lock validation
+- **THEN** exact S5 and S7 stress simulations are run by default even if approximate stress was used during broad screening
+- **AND** final validation pass/fail uses the exact stress results
+
+
+
+
+
+
+### Requirement: Sweep results expose stock sub-split
+
+Sweep output MUST include an explicit stock sub-split column (or equivalent field) so analysts can filter and compare domestic/QDII exposures without parsing configuration IDs.
+
+#### Scenario: Stock sub-split column present
+
+- **WHEN** the sweep completes
+- **THEN** sweep_results.csv includes a stock sub-split field for every row
+- **AND** values identify 60/40, 50/50, or 40/60

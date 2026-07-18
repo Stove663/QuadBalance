@@ -35,6 +35,7 @@ class ValidationResult:
     behavior_stress_results: list[BehaviorStressResult] = field(default_factory=list)
     cross_border_stress_results: list[CrossBorderStressResult] = field(default_factory=list)
     product_risk: ProductRiskSummary | None = None
+    needs_review: list[str] = field(default_factory=list)
 
 
 def evaluate_acceptance(
@@ -49,6 +50,7 @@ def evaluate_acceptance(
     product_risk: ProductRiskSummary | None = None,
 ) -> ValidationResult:
     failures: list[str] = []
+    needs_review: list[str] = []
 
     if metrics.max_drawdown < -0.25:
         failures.append(f"Criterion 1: max drawdown {metrics.max_drawdown:.1%} > 25%")
@@ -64,12 +66,16 @@ def evaluate_acceptance(
         )
 
     for sr in stress_results:
-        if sr.classification in {"fail", "thesis-broken"} or not sr.passed:
+        if sr.classification in {"fail", "thesis-broken"}:
             failures.append(f"Criterion 3: stress {sr.scenario_id} failed ({sr.classification})")
         elif sr.classification == "review-required":
-            failures.append(f"Criterion 3: stress {sr.scenario_id} requires review")
+            needs_review.append(f"Criterion 3: stress {sr.scenario_id} requires review")
+        elif not sr.passed:
+            failures.append(f"Criterion 3: stress {sr.scenario_id} failed ({sr.classification})")
         if sr.scenario_id == "S13" and sr.liquidity_impairment_days >= 252:
-            failures.append("Criterion 3: persistent correlation/liquidity stress indicates prolonged liquidity impairment")
+            note = "Criterion 3: persistent correlation/liquidity stress indicates prolonged liquidity impairment"
+            if sr.classification not in {"fail", "thesis-broken"}:
+                needs_review.append(note)
 
     path_stress_results = path_stress_results or []
     behavior_stress_results = behavior_stress_results or []
@@ -79,22 +85,22 @@ def evaluate_acceptance(
         if pr.classification == "thesis-broken":
             failures.append(f"Criterion 3: path stress {pr.scenario_id} failed")
         elif pr.classification == "review-required":
-            failures.append(f"Criterion 3: path stress {pr.scenario_id} requires review")
+            needs_review.append(f"Criterion 3: path stress {pr.scenario_id} requires review")
     for br in behavior_stress_results:
         if br.classification == "thesis-broken":
             failures.append(f"Criterion 3: behavior stress {br.rule_id} failed")
         elif br.classification == "review-required":
-            failures.append(f"Criterion 3: behavior stress {br.rule_id} requires review")
+            needs_review.append(f"Criterion 3: behavior stress {br.rule_id} requires review")
     for cr in cross_border_stress_results:
         if cr.classification == "thesis-broken":
             failures.append(f"Criterion 3: cross-border stress {cr.scenario_id} failed")
         elif cr.classification == "review-required":
-            failures.append(f"Criterion 3: cross-border stress {cr.scenario_id} requires review")
+            needs_review.append(f"Criterion 3: cross-border stress {cr.scenario_id} requires review")
     if product_risk is not None:
         if product_risk.worst_classification == "thesis-broken":
             failures.append("Criterion 3: product-level risk failed")
         elif product_risk.worst_classification == "review-required" or product_risk.weighted_score >= 40:
-            failures.append("Criterion 3: product-level risk requires review")
+            needs_review.append("Criterion 3: product-level risk requires review")
 
     cash_bench = benchmarks["cash"]
     if metrics.annualized_return < cash_bench.annualized_return + 0.02:
@@ -135,7 +141,20 @@ def evaluate_acceptance(
             "governance_notes": suit.governance_notes,
         }
 
-    result = ValidationResult(config.config_id, len(failures) == 0, failures, metrics, comp, stress_results, boundary, [], [], profile_payload, robustness)
+    result = ValidationResult(
+        config.config_id,
+        len(failures) == 0,
+        failures,
+        metrics,
+        comp,
+        stress_results,
+        boundary,
+        [],
+        [],
+        profile_payload,
+        robustness,
+        needs_review=needs_review,
+    )
     result.path_stress_results = path_stress_results
     result.behavior_stress_results = behavior_stress_results
     result.cross_border_stress_results = cross_border_stress_results

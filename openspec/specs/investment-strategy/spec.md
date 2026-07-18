@@ -161,3 +161,37 @@ The strategy lock document SHALL include an Investor Profile Suitability section
 - **AND** does not automatically change target allocation weights
 - **AND** states that allocation redesign requires a new validation run
 
+
+### Requirement: Project scope alignment
+
+The strategy SHALL align with the project goal of supporting a personal long-term investment workflow with three phases: a core engine for expected return, backtest, and stress testing; a GUI in a later phase; and a ledger in a later phase for recording buys, sells, and rebalancing activity.
+
+The first-phase implementation SHALL focus on data-driven backtesting, deterministic stress testing, and suitability assessment before GUI or ledger work begins.
+
+The current codebase SHALL remain modular across data loading, configuration, simulation, metrics, suitability evaluation, reporting, and scenario definitions so that later GUI and ledger work can be added without rewriting the core engine.
+
+The report outputs SHALL be standardized as CSV plus markdown in the first phase, while leaving JSON export and ledger-ingestion interfaces for later phases.
+
+The MVP implementation SHALL use daily backtest frequency, fixed-amount DCA, threshold-based rebalancing that uses new cash first, rule-driven suitability classification, and a backtest window of 15+ years when available.
+
+#### Scenario: Scope remains phased
+
+- **WHEN** the project is planned or reviewed
+- **THEN** the core engine remains the first-phase deliverable
+- **AND** GUI and ledger capabilities are treated as later phases
+- **AND** the strategy work does not require live brokerage integration or automated trading
+
+
+
+
+
+
+### Requirement: Stocks sub-split as mechanical parameter
+
+The strategy SHALL treat Stocks domestic/QDII sub-split as a mechanical configuration parameter alongside allocation weights, bond variant, DCA method, and rebalancing threshold. Once a configuration is locked, changing the stock sub-split REQUIRES a new validation run and a new strategy lock document.
+
+#### Scenario: Locked stock sub-split is immutable
+
+- **WHEN** a strategy is locked with stock sub-split 50/50
+- **THEN** the lock document records domestic 50% / QDII 50% within Stocks
+- **AND** changing to 60/40 or 40/60 requires a new change proposal and re-validation

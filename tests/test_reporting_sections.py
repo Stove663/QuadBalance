@@ -75,10 +75,13 @@ def test_format_boundary_summary_lists_classifications():
         benchmark_comparison={},
         stress_results=[],
         boundary_classifications={"macro": "review-required", "behavioral": "normal"},
+        needs_review=["Criterion 3: stress S20 requires review"],
     )
     text = format_boundary_summary(validation)
     assert "macro" in text
     assert "review-required" in text
+    assert "Needs Review" in text
+    assert "S20" in text
 
 
 def test_format_lifecycle_summary_renders_rows():

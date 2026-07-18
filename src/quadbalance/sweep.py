@@ -20,7 +20,7 @@ from quadbalance.metrics import PerformanceMetrics, cash_risk_free_rate, classif
 from quadbalance.product_risk import ProductRiskSummary
 from quadbalance.simulator import SimulationResult, simulate
 from quadbalance.stress import S4PathResult, StressResult, run_stress_tests
-from quadbalance.validation import evaluate_acceptance
+from quadbalance.validation import ValidationResult, evaluate_acceptance
 
 RobustnessVerdict = Literal["robust", "sensitive", "fragile", "thesis-broken"]
 
@@ -299,6 +299,7 @@ def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, st
         "validation_stage": validation_stage,
         "validation_passed": validation.passed,
         "failure_reasons": "; ".join(validation.failure_reasons),
+        "needs_review": "; ".join(getattr(validation, "needs_review", []) or []),
         "boundary_macro": validation.boundary_classifications.get("macro", ""),
         "boundary_behavioral": validation.boundary_classifications.get("behavioral", ""),
         "boundary_real_return": validation.boundary_classifications.get("real_return", ""),
@@ -334,7 +335,6 @@ def _run_one_config(
     benchmarks,
     risk_free_annual: float,
     profile_thresholds_path: Path | None,
-    screening_only: bool = False,
 ) -> tuple[dict[str, Any], ValidationResult, StrategyConfig, SimulationResult, bool] | None:
     print(
         f"[{idx}/{total_configs}] Running {config.config_id} | "
@@ -381,7 +381,8 @@ def _run_one_config(
         cross_border_stress_results=cross_border_results,
         product_risk=product_risk,
     )
-    validation.long_term_results = [] if screening_only else run_long_term_stress_tests(config, prices)
+    # LT1–LT3 deferred to lock selection in run_sweep (skip for all sweep candidates).
+    validation.long_term_results = []
     validation.benchmark_comparison = benchmark_comparison(metrics, benchmarks)
     validation.profile_suitability = _build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
 
@@ -413,7 +414,7 @@ def run_sweep(
     best_bundle: dict[str, Any] | None = None
 
     total_configs = len(configs)
-    max_workers = min(4, os.cpu_count() or 2)
+    max_workers = min(8, os.cpu_count() or 2)
     payloads = [
         (idx, total_configs, config, prices, backup_prices, benchmarks, risk_free_annual, profile_thresholds_path)
         for idx, config in enumerate(configs, start=1)
@@ -437,6 +438,7 @@ def run_sweep(
         validation = best_bundle["validation"]
         config = best_bundle["config"]
         sim_result = best_bundle["sim_result"]
+        validation.long_term_results = run_long_term_stress_tests(config, prices)
         _generate_lock_document(config, sim_result, validation, output_dir / "strategy-lock.md", intended_profile=intended_profile)
         if full_sensitivity:
             _write_sensitivity_outputs(output_dir, prices, config)

@@ -57,6 +57,12 @@ def format_boundary_summary(validation: ValidationResult) -> str:
     for key, value in validation.boundary_classifications.items():
         lines.append(f"| {key} | {value} |")
     lines.append("")
+    needs_review = getattr(validation, "needs_review", None) or []
+    if needs_review:
+        lines.extend(["## Needs Review", ""])
+        for item in needs_review:
+            lines.append(f"- {item}")
+        lines.append("")
     return "\n".join(lines)
 
 
