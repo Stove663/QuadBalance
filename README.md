@@ -98,6 +98,28 @@ uv run pytest
 uv run quadbalance --output output
 ```
 
+## 个人工作台（NiceGUI）
+
+本机浏览器 UI（无需账号）：验证试跑 / 全量 sweep、锁定策略、记账、超阈调仓指引。
+
+```bash
+uv sync
+uv run quadbalance-ui
+```
+
+请在**仓库根目录**启动，以便使用 `.cache/` 行情缓存与 `./data/quadbalance.db`。
+
+| 路径 | 说明 |
+|------|------|
+| `output/<run_id>/` | 每次 UI 验证的独立产物（含 `artifacts/equity_curve.json` 等） |
+| `./data/quadbalance.db` | 策略锁历史 + 个人账本（请自行备份） |
+
+账本区分 **结算现金**（未投资）与 **现金象限货基份额**。净值自动从行情缓存更新，可点「刷新行情」。分红默认（现金/再投）可在账本页设置；公司行为同步幂等。
+
+回测净值/回撤图使用引擎默认本金与定投假设，**仅作示意**，不等于实盘规模。
+
+CLI `quadbalance` 仍可按原方式使用（默认可写 `output/`）。
+
 ## 示例输出
 
 ```text

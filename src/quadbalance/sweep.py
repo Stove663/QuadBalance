@@ -440,6 +440,17 @@ def run_sweep(
         sim_result = best_bundle["sim_result"]
         validation.long_term_results = run_long_term_stress_tests(config, prices)
         _generate_lock_document(config, sim_result, validation, output_dir / "strategy-lock.md", intended_profile=intended_profile)
+        from quadbalance.artifacts import write_run_artifacts
+        from quadbalance.profile_thresholds import DEFAULT_INVESTOR_PROFILES
+
+        write_run_artifacts(
+            output_dir,
+            config,
+            sim_result,
+            validation,
+            DEFAULT_INVESTOR_PROFILES,
+            validation.lifecycle_results,
+        )
         if full_sensitivity:
             _write_sensitivity_outputs(output_dir, prices, config)
         return df, validation, config

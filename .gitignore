@@ -12,3 +12,4 @@ wheels/
 # Backtest cache and output
 .cache/
 output/
+data/
