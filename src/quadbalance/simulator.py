@@ -189,11 +189,20 @@ def _merge_day_prices(core_row: pd.Series, backup_prices: dict[str, pd.Series] |
     merged = core_row.copy()
     if not backup_prices:
         return merged
+    max_stale = pd.Timedelta(days=14)  # ~10 trading sessions
     for sym, series in backup_prices.items():
-        if dt in series.index:
-            val = series.loc[dt]
-            if pd.notna(val):
-                merged[sym] = float(val)
+        if series is None or series.empty:
+            continue
+        val = series.loc[dt] if dt in series.index else float("nan")
+        if pd.isna(val):
+            hist = series.loc[:dt].dropna()
+            if hist.empty:
+                continue
+            age = dt - hist.index[-1]
+            if age > max_stale:
+                continue
+            val = hist.iloc[-1]
+        merged[sym] = float(val)
     return merged
 
 
@@ -448,11 +457,21 @@ def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: Strategy
             unfilled = _buy_qdii_with_quota(shares, buy_amt, day_prices, config, ctx, dt)
             _handle_qdii_unfilled(shares, unfilled, day_prices, ctx, dt)
 
-    ctx.post_rebalance_deviations.append(_max_quadrant_deviation(shares, day_prices, config, ctx.qdii_backlog))
+    # Pending QDII cash is already parked in the cash sleeve — do not add backlog again.
+    ctx.post_rebalance_deviations.append(_max_quadrant_deviation(shares, day_prices, config))
+
+
+TRADING_DAYS_PER_MONTH = 21
+
+
+def _trading_days_to_months(trading_days: int) -> int:
+    if trading_days <= 0:
+        return 0
+    return (trading_days + TRADING_DAYS_PER_MONTH - 1) // TRADING_DAYS_PER_MONTH
 
 
 def _record_weight_gap(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp) -> None:
-    total = _portfolio_value(shares, day_prices, ctx.qdii_backlog)
+    total = _portfolio_value(shares, day_prices)
     if total <= 0:
         return
     actual = _qdii_holdings_value(shares, day_prices, dt) / total
@@ -460,16 +479,16 @@ def _record_weight_gap(shares: dict[str, float], day_prices: pd.Series, config: 
     ctx.weight_gaps.append(gap)
     if gap < -0.02:
         ctx.qdii_friction_streak += 1
+        ctx.qdii_friction_months = max(ctx.qdii_friction_months, _trading_days_to_months(ctx.qdii_friction_streak))
     else:
-        if ctx.qdii_friction_streak >= 12:
-            ctx.qdii_friction_months = max(ctx.qdii_friction_months, ctx.qdii_friction_streak)
         ctx.qdii_friction_streak = 0
     if actual >= config.qdii_target_weight() * 0.5:
-        if ctx.qdii_recovery_streak > 0 and ctx.qdii_recovery_streak >= 24:
-            ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, ctx.qdii_recovery_streak)
+        if ctx.qdii_recovery_streak > 0:
+            ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, _trading_days_to_months(ctx.qdii_recovery_streak))
         ctx.qdii_recovery_streak = 0
     else:
         ctx.qdii_recovery_streak += 1
+        ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, _trading_days_to_months(ctx.qdii_recovery_streak))
 
 
 def _build_rebalance_metrics(ctx: _SimContext) -> RebalanceExecutionMetrics:
@@ -502,6 +521,7 @@ def simulate(
     enable_rebalance: bool = True,
     backup_prices: dict[str, pd.Series] | None = None,
     friction_profile: ExecutionFrictionProfile | None = None,
+    pause_contribution_months: set | None = None,
 ) -> SimulationResult:
     if friction_profile is not None:
         validate_friction_profile(friction_profile)
@@ -540,7 +560,40 @@ def simulate(
             )
             _proportional_contribution(shares, base_capital, day_prices, config, ctx, dt)
         else:
-            if dt in month_starts:
+            is_contrib_day = dt in month_starts
+            month_period = dt.to_period("M")
+            contrib_paused = bool(pause_contribution_months and month_period in pause_contribution_months)
+            rebalance_triggered = False
+            if enable_rebalance and dt in year_starts:
+                total = _portfolio_value(shares, day_prices)
+                q_vals = _quadrant_values(shares, day_prices, config)
+                targets = config.quadrant_weights
+                rebalance_triggered = total > 0 and any(
+                    abs(q_vals[q] / total - targets[q]) > config.rebalance_threshold for q in targets
+                )
+
+            if rebalance_triggered:
+                extra = 0.0
+                if is_contrib_day and not contrib_paused:
+                    ctx.events.append(
+                        SimulationEvent(
+                            date=dt.strftime("%Y-%m-%d"),
+                            event_type="contribution",
+                            cash_amount=monthly_contribution,
+                            note=config.dca_method,
+                        )
+                    )
+                    extra = monthly_contribution
+                _rebalance(shares, day_prices, config, ctx, dt, extra)
+                rebalance_events.append(dt.strftime("%Y-%m-%d"))
+                ctx.events.append(
+                    SimulationEvent(
+                        date=dt.strftime("%Y-%m-%d"),
+                        event_type="rebalance",
+                        cash_amount=0.0,
+                    )
+                )
+            elif is_contrib_day and not contrib_paused:
                 ctx.events.append(
                     SimulationEvent(
                         date=dt.strftime("%Y-%m-%d"),
@@ -553,31 +606,10 @@ def simulate(
                     _proportional_contribution(shares, monthly_contribution, day_prices, config, ctx, dt)
                 else:
                     _underweight_contribution(shares, monthly_contribution, day_prices, config, ctx, dt)
-            if enable_rebalance and dt in year_starts and i > 0:
-                total = _portfolio_value(shares, day_prices)
-                q_vals = _quadrant_values(shares, day_prices, config)
-                targets = config.quadrant_weights
-                triggered = any(abs(q_vals[q] / total - targets[q]) > config.rebalance_threshold for q in targets if total > 0)
-                if triggered:
-                    extra = monthly_contribution if dt in month_starts else 0.0
-                    if extra and config.dca_method == "underweight":
-                        _underweight_contribution(shares, extra, day_prices, config, ctx, dt)
-                        extra = 0.0
-                    elif extra:
-                        _proportional_contribution(shares, extra, day_prices, config, ctx, dt)
-                        extra = 0.0
-                    _rebalance(shares, day_prices, config, ctx, dt, extra)
-                    rebalance_events.append(dt.strftime("%Y-%m-%d"))
-                    ctx.events.append(
-                        SimulationEvent(
-                            date=dt.strftime("%Y-%m-%d"),
-                            event_type="rebalance",
-                            cash_amount=0.0,
-                        )
-                    )
 
         _record_weight_gap(shares, day_prices, config, ctx, dt)
         ctx.backlog_history.append(ctx.qdii_backlog)
+        # Backlog is earmarked cash already held in CASH_SYMBOL via _park_in_cash.
         values.append(_portfolio_value(shares, day_prices))
         pending_series.append(ctx.qdii_backlog)
         dates.append(dt)
@@ -587,10 +619,10 @@ def simulate(
     annual_quadrant = _compute_annual_quadrant_returns(sim_prices, config)
     instrument_starts = {s: sim_prices[s].first_valid_index().strftime("%Y-%m-%d") for s in core_symbols}
 
-    if ctx.qdii_friction_streak >= 12:
-        ctx.qdii_friction_months = max(ctx.qdii_friction_months, ctx.qdii_friction_streak)
-    if ctx.qdii_recovery_streak >= 24:
-        ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, ctx.qdii_recovery_streak)
+    if ctx.qdii_friction_streak > 0:
+        ctx.qdii_friction_months = max(ctx.qdii_friction_months, _trading_days_to_months(ctx.qdii_friction_streak))
+    if ctx.qdii_recovery_streak > 0:
+        ctx.qdii_recovery_months = max(ctx.qdii_recovery_months, _trading_days_to_months(ctx.qdii_recovery_streak))
 
     return SimulationResult(
         config_id=config.config_id,
@@ -635,23 +667,34 @@ def simulate_lifecycle(
     interrupt_months: int = 0,
     withdrawal_mode: str = "end",
 ) -> LifecycleResult:
-    base = simulate(prices, config)
+    month_index = prices.index.to_period("M")
+    months = sorted(month_index.unique())
+    paused = set(months[:interrupt_months]) if interrupt_months > 0 else set()
+    base = simulate(prices, config, pause_contribution_months=paused)
     lifecycle = base.daily_values.copy()
-    month_periods = lifecycle.index.to_period("M")
-    months = sorted(month_periods.unique())
-    interrupted = set(months[:interrupt_months]) if interrupt_months > 0 else set()
+    life_months = lifecycle.index.to_period("M")
 
-    lifecycle_events: list[SimulationEvent] = []
+    lifecycle_events: list[SimulationEvent] = list(base.events)
     requested_withdrawal = paid_withdrawal = unfunded_withdrawal = 0.0
     forced_sale_amount = underwater_forced_sale_amount = 0.0
-    contribution_missed = 0.0
+    contribution_missed = float(interrupt_months * MONTHLY_CONTRIBUTION) if interrupt_months > 0 else 0.0
     safe_spending_breached = False
     depletion_date: str | None = None
 
-    if interrupted:
-        interruption_mask = month_periods.isin(interrupted)
-        contribution_missed = float((lifecycle.loc[interruption_mask].shift(1).fillna(lifecycle.iloc[0]) - lifecycle.loc[interruption_mask]).abs().sum())
-        lifecycle.loc[interruption_mask] = 0.0
+    if paused:
+        for period in paused:
+            sample = lifecycle.index[life_months == period]
+            if len(sample) == 0:
+                continue
+            lifecycle_events.append(
+                SimulationEvent(
+                    date=sample[0].strftime("%Y-%m-%d"),
+                    event_type="contribution_pause",
+                    cash_amount=MONTHLY_CONTRIBUTION,
+                    scenario_id=scenario_id,
+                    note="dca_interrupted",
+                )
+            )
 
     if scenario_id == "one_time_liquidity_20pct" and len(lifecycle) > 0:
         drawdown_mask = lifecycle < lifecycle.cummax()

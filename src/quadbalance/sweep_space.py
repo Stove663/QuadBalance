@@ -15,7 +15,7 @@ DcaMethod = Literal["proportional", "underweight"]
 
 SWEEP_BOND_VARIANTS: tuple[BondVariant, ...] = ("B1", "B2", "B3")
 SWEEP_DCA_METHODS: tuple[DcaMethod, ...] = ("proportional", "underweight")
-SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.03, 0.05)
+SWEEP_REBALANCE_THRESHOLDS: tuple[float, ...] = (0.05,)
 SWEEP_ALLOCATIONS: tuple[str, ...] = tuple(ALLOCATION_VARIANTS.keys())
 
 

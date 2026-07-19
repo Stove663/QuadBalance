@@ -14,7 +14,13 @@ from quadbalance.asset_universe import (
     MONTHLY_CONTRIBUTION,
 )
 from quadbalance.fees import purchase_fee_rate
-from quadbalance.metrics import PerformanceMetrics, _max_drawdown
+from quadbalance.metrics import (
+    PerformanceMetrics,
+    _max_drawdown,
+    annualized_twr,
+    dca_schedule_cashflows,
+    time_weighted_daily_returns,
+)
 from quadbalance.simulator import _first_trading_days_per_month, _portfolio_value
 
 
@@ -24,6 +30,12 @@ class BenchmarkResult:
     annualized_return: float
     max_drawdown: float
     daily_values: pd.Series
+
+
+def _ann_from_dca_values(values: pd.Series, base_capital: float, monthly_contribution: float) -> float:
+    month_starts = _first_trading_days_per_month(values.index)
+    cashflows = dca_schedule_cashflows(values.index, base_capital, monthly_contribution, month_starts)
+    return annualized_twr(time_weighted_daily_returns(values, cashflows))
 
 
 def _simulate_single_asset_benchmark(
@@ -80,24 +92,21 @@ def run_benchmarks(prices: pd.DataFrame) -> dict[str, BenchmarkResult]:
 
     csi = _simulate_single_asset_benchmark(BENCHMARK_CSI300, prices[BENCHMARK_CSI300].dropna())
     mdd, _, _ = _max_drawdown(csi)
-    years = len(csi) / 252
-    ann = (csi.iloc[-1] / csi.iloc[0]) ** (1 / years) - 1
+    ann = _ann_from_dca_values(csi, BASE_CAPITAL, MONTHLY_CONTRIBUTION)
     results["csi300"] = BenchmarkResult(f"CSI 300 ({BENCHMARK_CSI300})", ann, mdd, csi)
 
     mix = _simulate_weighted_benchmark(
         prices, {BENCHMARK_CSI300: 0.6, BENCHMARK_BOND: 0.4}
     )
     mdd, _, _ = _max_drawdown(mix)
-    years = len(mix) / 252
-    ann = (mix.iloc[-1] / mix.iloc[0]) ** (1 / years) - 1
+    ann = _ann_from_dca_values(mix, BASE_CAPITAL, MONTHLY_CONTRIBUTION)
     results["60_40"] = BenchmarkResult(
         f"60/40 ({BENCHMARK_CSI300}/{BENCHMARK_BOND})", ann, mdd, mix
     )
 
     cash = _simulate_single_asset_benchmark(BENCHMARK_CASH, prices[BENCHMARK_CASH].dropna())
     mdd, _, _ = _max_drawdown(cash)
-    years = len(cash) / 252
-    ann = (cash.iloc[-1] / cash.iloc[0]) ** (1 / years) - 1
+    ann = _ann_from_dca_values(cash, BASE_CAPITAL, MONTHLY_CONTRIBUTION)
     results["cash"] = BenchmarkResult(f"Cash ({BENCHMARK_CASH})", ann, mdd, cash)
 
     return results

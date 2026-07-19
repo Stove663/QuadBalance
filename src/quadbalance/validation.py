@@ -16,6 +16,8 @@ from quadbalance.simulator import LifecycleResult
 from quadbalance.stress import StressResult
 
 MAX_NAV_RECOVERY_DAYS = 252
+# Unrecovered drawdowns shallower than this are review-required, not hard fail.
+SHALLOW_UNRECOVERED_MDD = -0.10
 
 
 @dataclass
@@ -59,7 +61,12 @@ def evaluate_acceptance(
         failures.append(f"Criterion 2: worst year {metrics.worst_year_return:.1%} < -20%")
 
     if metrics.max_drawdown_recovery_days is None:
-        failures.append("Criterion 3: maximum drawdown never recovered within the test window")
+        if metrics.max_drawdown <= SHALLOW_UNRECOVERED_MDD:
+            failures.append("Criterion 3: maximum drawdown never recovered within the test window")
+        else:
+            needs_review.append(
+                "Criterion 3: maximum drawdown not fully recovered by window end (shallow)"
+            )
     elif metrics.max_drawdown_recovery_days > MAX_NAV_RECOVERY_DAYS:
         failures.append(
             f"Criterion 3: maximum drawdown recovery took {metrics.max_drawdown_recovery_days} trading days, exceeding {MAX_NAV_RECOVERY_DAYS}"
@@ -124,7 +131,24 @@ def evaluate_acceptance(
 
     boundary = {
         "macro": "review-required" if any(sr.scenario_id in {"S8", "S9", "S10", "S11", "S12", "S13"} and not sr.passed for sr in stress_results) else "normal",
-        "behavioral": "thesis-broken" if metrics.max_drawdown_recovery_days is None or metrics.max_drawdown_recovery_days > MAX_NAV_RECOVERY_DAYS else ("review-required" if metrics.longest_underwater_days > 252 * 3 else "normal"),
+        "behavioral": (
+            "thesis-broken"
+            if (
+                (metrics.max_drawdown_recovery_days is None and metrics.max_drawdown <= SHALLOW_UNRECOVERED_MDD)
+                or (
+                    metrics.max_drawdown_recovery_days is not None
+                    and metrics.max_drawdown_recovery_days > MAX_NAV_RECOVERY_DAYS
+                )
+            )
+            else (
+                "review-required"
+                if (
+                    metrics.max_drawdown_recovery_days is None
+                    or metrics.longest_underwater_days > 252 * 3
+                )
+                else "normal"
+            )
+        ),
         "real_return": "thesis-broken" if metrics.worst_rolling_5y_real_return < -0.10 else ("review-required" if metrics.worst_rolling_3y_real_return < 0 else "normal"),
     }
 

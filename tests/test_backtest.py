@@ -30,7 +30,7 @@ def synthetic_prices() -> pd.DataFrame:
 
 def test_generate_sweep_count():
     configs = generate_sweep_configs()
-    assert len(configs) == 11 * 3 * 2 * 2 * 3  # 396 configurations including stock sub-splits
+    assert len(configs) == 11 * 3 * 2 * 1 * 3  # 198 configurations including stock sub-splits
 
 
 def test_simulate_runs(synthetic_prices: pd.DataFrame):

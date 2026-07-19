@@ -109,7 +109,7 @@ def generate_lock_document(
         f"| Positive years | {m.positive_years_pct:.0%} |",
         f"| Rebalance premium | {m.rebalance_premium:.2%} |",
         f"| Real annualized return | {m.real_annualized_return:.2%} |",
-        f"| Real terminal wealth | {m.real_terminal_wealth:,.0f} |",
+        f"| Real terminal wealth | {m.real_terminal_wealth:.2f}x contributed |",
         f"| Worst rolling 3y real return | {m.worst_rolling_3y_real_return:.2%} |",
         f"| Longest underwater days | {m.longest_underwater_days} |",
         f"| Average drawdown | {m.average_drawdown:.2%} |",
@@ -169,7 +169,7 @@ def generate_lock_document(
         lines.extend([
             "## Long-Term Macro Regime Interpretation",
             "",
-            "- LT1 emphasizes inflation persistence and weak real bond/cash protection.",
+            "- LT1 is an executable stagflation stress: gold nominal ≈ CPI, cash lags CPI by ~2pp; stocks/long bonds remain weak.",
             "- LT2 emphasizes deflationary stagnation where nominal returns can look acceptable while real growth stays weak.",
             "- LT3 emphasizes a Japan-style balance-sheet recession with prolonged low growth, weaker domestic risk assets, and persistent QDII drag from quota/currency frictions.",
             "- In this framework, overseas assets are not automatically a hedge: they can buffer domestic stagnation, but they can also underperform when currency, quota, and valuation headwinds persist.",

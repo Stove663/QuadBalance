@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from quadbalance.metrics import PerformanceMetrics
+from quadbalance.metrics import PerformanceMetrics, external_cashflows_from_events, time_weighted_daily_returns
 from quadbalance.simulator import SimulationResult
 
 
@@ -62,7 +62,8 @@ def run_behavior_stress_tests(
     daily = sim_result.daily_values
     drawdown = _drawdown_series(daily)
     base_terminal = float(daily.iloc[-1])
-    base_total_return = float(daily.iloc[-1] / daily.iloc[0] - 1.0)
+    twr = time_weighted_daily_returns(daily, external_cashflows_from_events(daily, getattr(sim_result, "events", []) or []))
+    base_total_return = float((1.0 + twr).prod() - 1.0) if len(twr) else float(daily.iloc[-1] / daily.iloc[0] - 1.0)
     results: list[BehaviorStressResult] = []
     for rule in rules:
         breaches = drawdown[drawdown <= rule.trigger_drawdown]
@@ -70,7 +71,8 @@ def run_behavior_stress_tests(
         triggered = bool(not breaches.empty and prolonged_pain)
         trigger_date = breaches.index[0].strftime("%Y-%m-%d") if triggered else None
         adjusted_terminal = base_terminal * (1.0 - rule.terminal_haircut) if triggered else base_terminal
-        adjusted_return = base_total_return - rule.terminal_haircut if triggered else base_total_return
+        # Compounded haircut on total return: (1+R)*(1-h)-1, not R-h.
+        adjusted_return = (1.0 + base_total_return) * (1.0 - rule.terminal_haircut) - 1.0 if triggered else base_total_return
         classification, reasons = _classify_behavior(triggered, adjusted_return, rule.terminal_haircut)
         results.append(
             BehaviorStressResult(

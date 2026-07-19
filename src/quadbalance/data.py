@@ -306,6 +306,9 @@ def load_market_data(
     return prices, backups, meta
 
 
+MAX_NAV_STALE_DAYS = 5
+
+
 def load_price_matrix_with_meta(
     symbols: list[str] | None = None,
     start: str = PRIMARY_START,
@@ -325,7 +328,12 @@ def load_price_matrix_with_meta(
         if usage is not None:
             proxy_usage.append(usage)
 
-    prices = pd.DataFrame(series_map).sort_index().ffill().dropna(how="any")
+    # Bound forward-fill so suspended/missing NAVs do not stay tradable indefinitely.
+    raw = pd.DataFrame(series_map).sort_index()
+    if raw.empty:
+        return raw, PriceMatrixMeta(proxy_usage=tuple(proxy_usage))
+    calendar = pd.bdate_range(raw.index.min(), raw.index.max())
+    prices = raw.reindex(calendar).ffill(limit=MAX_NAV_STALE_DAYS).dropna(how="any")
     return prices, PriceMatrixMeta(proxy_usage=tuple(proxy_usage))
 
 

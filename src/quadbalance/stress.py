@@ -9,9 +9,39 @@ import pandas as pd
 
 from quadbalance.config import StrategyConfig
 from quadbalance.instrument_pool import qdii_pool_codes
+from quadbalance.metrics import external_cashflows_from_events, time_weighted_daily_returns
 from quadbalance.simulator import SimulationResult, simulate
 from quadbalance.stress_scenarios import STRESS_SCENARIOS
 from quadbalance.stress_thresholds import DEFAULT_STRESS_THRESHOLDS
+
+
+def _twr_total_return(sim: SimulationResult, values: pd.Series | None = None) -> float:
+    series = values if values is not None else sim.daily_values
+    if len(series) < 2:
+        return 0.0
+    cashflows = external_cashflows_from_events(series, getattr(sim, "events", []) or [])
+    rets = time_weighted_daily_returns(series, cashflows)
+    if rets.empty:
+        return 0.0
+    return float((1.0 + rets).prod() - 1.0)
+
+
+def _sim_span_years(sim: SimulationResult) -> float:
+    idx = sim.daily_values.index
+    if len(idx) < 2:
+        return 1.0
+    days = max((idx[-1] - idx[0]).days, 1)
+    return days / 365.25
+
+
+def _annualized_twr_impact(baseline_total: float, stressed_total: float, years: float) -> float:
+    """Difference of annualized TWRs (stressed − baseline), not cumulative impact."""
+    span = max(float(years), 1.0 / 365.25)
+
+    def _ann(total: float) -> float:
+        return float((1.0 + total) ** (1.0 / span) - 1.0)
+
+    return _ann(stressed_total) - _ann(baseline_total)
 
 
 @dataclass
@@ -141,8 +171,11 @@ def run_s4_path_test(
     if len(window_daily) < 2:
         return S4PathResult(years, 0.0, 0.0, 0.0, True)
 
-    cumulative = window_daily.iloc[-1] / window_daily.iloc[0] - 1.0
-    annual = window_daily.groupby(window_daily.index.year).apply(lambda s: s.iloc[-1] / s.iloc[0] - 1.0)
+    cumulative = _twr_total_return(sim, window_daily)
+    twr_cf = external_cashflows_from_events(window_daily, getattr(sim, "events", []) or [])
+    twr_rets = time_weighted_daily_returns(window_daily, twr_cf)
+    twr_index = (1.0 + twr_rets).cumprod() if len(twr_rets) else window_daily
+    annual = twr_index.groupby(twr_index.index.year).apply(lambda s: s.iloc[-1] / s.iloc[0] - 1.0)
     worst_year = float(annual.min()) if len(annual) else 0.0
     span_years = len(years)
     window_ann = (1.0 + cumulative) ** (1.0 / span_years) - 1.0 if span_years else 0.0
@@ -253,7 +286,7 @@ def run_full_stress_tests(
     mode: StressMode = StressMode.exact,
 ) -> tuple[list[StressResult], S4PathResult | None]:
     results = [sr for sr in run_fast_stress_tests(config, sim_result) if sr.scenario_id != "S4"]
-    baseline_ret = sim_result.daily_values.iloc[-1] / sim_result.daily_values.iloc[0] - 1
+    baseline_ret = _twr_total_return(sim_result)
     for sid in sorted(FULL_STRESS_SCENARIOS):
         if sid in MECHANISM_STRESS_SCENARIOS:
             results.append(_mechanism_stress_result(config, sid))
@@ -263,9 +296,15 @@ def run_full_stress_tests(
             else:
                 s5_config = replace(config, qdii_premium=0.05)
                 s5_sim = simulate(prices, s5_config, backup_prices=backup_prices)
-                s5_ret = s5_sim.daily_values.iloc[-1] / s5_sim.daily_values.iloc[0] - 1
-                s5_impact = s5_ret - baseline_ret
-                result = StressResult("S5", "QDII premium (impact vs baseline)", s5_impact, 0.05, s5_impact > -0.10)
+                s5_ret = _twr_total_return(s5_sim)
+                s5_impact = _annualized_twr_impact(baseline_ret, s5_ret, _sim_span_years(sim_result))
+                result = StressResult(
+                    "S5",
+                    "QDII premium (annualized TWR impact vs baseline)",
+                    s5_impact,
+                    0.05,
+                    s5_impact > -0.10,
+                )
                 results.append(_classify_stress_result(result, s5_impact))
         elif sid == "S7" and include_s7:
             if mode == StressMode.exploratory:
@@ -274,11 +313,16 @@ def run_full_stress_tests(
                 low_caps = {code: 10.0 for code in qdii_pool_codes()}
                 s7_config = replace(config, qdii_daily_caps=low_caps)
                 s7_sim = simulate(prices, s7_config, backup_prices=backup_prices)
-                s7_ret = s7_sim.daily_values.iloc[-1] / s7_sim.daily_values.iloc[0] - 1
-                s7_impact = s7_ret - baseline_ret
+                s7_ret = _twr_total_return(s7_sim)
+                s7_impact = _annualized_twr_impact(baseline_ret, s7_ret, _sim_span_years(sim_result))
                 s7_fill = s7_sim.qdii_metrics.qdii_fill_rate if s7_sim.qdii_metrics else 0.0
-                result = StressResult("S7", f"Low QDII quota (fill {s7_fill:.0%}, impact vs baseline)", s7_impact, 0.10, True)
-                result = replace(result, threshold_basis="impact_vs_baseline")
+                result = StressResult(
+                    "S7",
+                    f"Low QDII quota (fill {s7_fill:.0%}, annualized TWR impact vs baseline)",
+                    s7_impact,
+                    0.10,
+                    True,
+                )
                 results.append(_classify_stress_result(result, s7_impact))
     s4_path = run_s4_path_test(config, prices, backup_prices=backup_prices, mode=mode) if include_s4 else None
     if s4_path is not None:

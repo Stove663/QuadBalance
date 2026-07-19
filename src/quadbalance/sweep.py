@@ -97,15 +97,23 @@ def load_profile_thresholds(profile_thresholds_path: Path | None):
 
 
 def run_path_stress_tests(*args, **kwargs) -> list[Any]:
-    return []
+    from quadbalance.path_stress import run_path_stress_tests as _run_path_stress_tests
+
+    # Sweep historically passed (config, prices, ...); real API is config-only.
+    config = args[0] if args else kwargs.get("config")
+    return _run_path_stress_tests(config)
 
 
 def run_behavior_stress_tests(*args, **kwargs) -> list[Any]:
-    return []
+    from quadbalance.behavior_stress import run_behavior_stress_tests as _run_behavior_stress_tests
+
+    return _run_behavior_stress_tests(*args, **kwargs)
 
 
 def assess_product_risk(*args, **kwargs) -> ProductRiskSummary | None:
-    return None
+    from quadbalance.product_risk import assess_product_risk as _assess_product_risk
+
+    return _assess_product_risk(*args, **kwargs)
 
 
 def run_long_term_stress_tests(config: StrategyConfig, prices: pd.DataFrame):
@@ -145,9 +153,26 @@ def _validate_config(config: StrategyConfig) -> None:
         raise ValueError("Rebalance threshold must be non-negative")
 
 
+def _apply_valuation_overlay(prices: pd.DataFrame, config: StrategyConfig, overlay: ValuationOverlay) -> pd.DataFrame:
+    """Apply a one-time level shock to sleeves named in overlay.adjustments."""
+    shocked = prices.copy()
+    for col in shocked.columns:
+        if config.is_qdii_symbol(col):
+            key = "qdii"
+        else:
+            key = config.quadrant_for_symbol(col)
+        delta = float(overlay.adjustments.get(key, 0.0))
+        if delta != 0.0:
+            shocked[col] = shocked[col] * (1.0 + delta)
+    return shocked
+
+
 def _evaluate_case(config: StrategyConfig, prices: pd.DataFrame, case: PerturbationCase, inflation_annual: float = 0.03) -> PerturbationResult:
-    sim = simulate(prices, case.config)
-    metrics = compute_metrics(sim, case.config, prices, risk_free_annual=0.0, inflation_annual=inflation_annual)
+    sim_prices = prices
+    if case.overlay is not None:
+        sim_prices = _apply_valuation_overlay(prices, case.config, case.overlay)
+    sim = simulate(sim_prices, case.config)
+    metrics = compute_metrics(sim, case.config, sim_prices, risk_free_annual=0.0, inflation_annual=inflation_annual)
     failures: list[str] = []
     if metrics.real_annualized_return < 0:
         failures.append("negative real annualized return")
@@ -411,7 +436,7 @@ def run_sweep(
     risk_free_annual = cash_risk_free_rate(prices)
 
     rows: list[dict[str, Any]] = []
-    best_bundle: dict[str, Any] | None = None
+    passing_bundles: list[dict[str, Any]] = []
 
     total_configs = len(configs)
     max_workers = min(8, os.cpu_count() or 2)
@@ -428,17 +453,47 @@ def run_sweep(
             row, validation, config, sim_result, screened_out = result
             rows.append(row)
             if validation.passed:
-                bundle = {"validation": validation, "config": config, "sim_result": sim_result}
-                best_bundle = prefer_lock_candidate(best_bundle, bundle, intended_profile)
+                qdii = getattr(sim_result, "qdii_metrics", None)
+                passing_bundles.append(
+                    {
+                        "validation": validation,
+                        "config": config,
+                        "sim_result": sim_result,
+                        "annualized_return": validation.metrics.annualized_return,
+                        "max_drawdown": validation.metrics.max_drawdown,
+                        "qdii_fill_rate": float(getattr(qdii, "qdii_fill_rate", 0.0) or 0.0),
+                        "config_id": config.config_id,
+                        "profile_suitability": validation.profile_suitability,
+                    }
+                )
 
     df = pd.DataFrame(rows)
     df.to_csv(output_dir / "sweep_results.csv", index=False)
 
-    if best_bundle is not None:
+    # Try lock candidates in preference order; long-term thesis-broken vetoes and tries next.
+    remaining = list(passing_bundles)
+    while remaining:
+        best_bundle: dict[str, Any] | None = None
+        for bundle in remaining:
+            best_bundle = prefer_lock_candidate(best_bundle, bundle, intended_profile)
+        assert best_bundle is not None
         validation = best_bundle["validation"]
         config = best_bundle["config"]
         sim_result = best_bundle["sim_result"]
         validation.long_term_results = run_long_term_stress_tests(config, prices)
+        if any(getattr(r, "classification", "") == "thesis-broken" for r in validation.long_term_results):
+            validation.passed = False
+            validation.failure_reasons = list(validation.failure_reasons) + [
+                f"Long-term stress thesis-broken: {r.scenario_id}"
+                for r in validation.long_term_results
+                if getattr(r, "classification", "") == "thesis-broken"
+            ]
+            if "config_id" in df.columns and "validation_passed" in df.columns:
+                df.loc[df["config_id"] == config.config_id, "validation_passed"] = False
+                df.to_csv(output_dir / "sweep_results.csv", index=False)
+            remaining = [b for b in remaining if b["config"].config_id != config.config_id]
+            continue
+
         _generate_lock_document(config, sim_result, validation, output_dir / "strategy-lock.md", intended_profile=intended_profile)
         from quadbalance.artifacts import write_run_artifacts
         from quadbalance.profile_thresholds import DEFAULT_INVESTOR_PROFILES

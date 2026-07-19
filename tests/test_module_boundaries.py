@@ -39,7 +39,8 @@ def test_sweep_space_generates_expected_cartesian_product():
     configs = generate_sweep_configs()
     assert len(SWEEP_BOND_VARIANTS) == 3
     assert len(SWEEP_DCA_METHODS) == 2
-    assert len(SWEEP_REBALANCE_THRESHOLDS) == 2
+    assert len(SWEEP_REBALANCE_THRESHOLDS) == 1
+    assert SWEEP_REBALANCE_THRESHOLDS == (0.05,)
     assert len(SWEEP_STOCK_SUB_SPLITS) == 3
     assert len(configs) == (
         len(ALLOCATION_VARIANTS)

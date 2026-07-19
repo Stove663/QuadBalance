@@ -483,14 +483,14 @@ def format_robustness_summary_markdown(robustness: RobustnessSweepResult | None)
         for case in robustness.cases:
             if case.kind != "parameter":
                 continue
-            lines.append(f"| {case.case_id} | {case.label} | {case.metrics.real_annualized_return:.2%} | {case.metrics.real_terminal_wealth:,.0f} | {'✓' if case.passed else '✗'} |")
+            lines.append(f"| {case.case_id} | {case.label} | {case.metrics.real_annualized_return:.2%} | {case.metrics.real_terminal_wealth:.2f}x | {'✓' if case.passed else '✗'} |")
         lines.append("")
     if robustness.valuation_cases:
         lines.extend(["### Valuation Overlays", "", "| Case | Label | Real Ann. | Real Terminal | Passed |", "|------|-------|-----------|---------------|--------|"])
         for case in robustness.cases:
             if case.kind != "overlay":
                 continue
-            lines.append(f"| {case.case_id} | {case.label} | {case.metrics.real_annualized_return:.2%} | {case.metrics.real_terminal_wealth:,.0f} | {'✓' if case.passed else '✗'} |")
+            lines.append(f"| {case.case_id} | {case.label} | {case.metrics.real_annualized_return:.2%} | {case.metrics.real_terminal_wealth:.2f}x | {'✓' if case.passed else '✗'} |")
         lines.append("")
     return "\n".join(lines)
 

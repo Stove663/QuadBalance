@@ -64,12 +64,30 @@ def test_cb3_moderate_qdii_is_not_auto_thesis_broken():
     assert results["CB3"].capital_mobility_constraint_months >= 18
 
 
-def test_cb3_severe_frozen_weight_is_thesis_broken():
+def test_cb3_severe_frozen_weight_is_review_not_thesis_broken():
     result = CrossBorderStressResult(
         "CB3",
         "Severe external asset availability constraint",
         portfolio_return=-0.20,
         liquid_portfolio_return=-0.25,
+        frozen_asset_weight=0.35,
+        qdii_haircut=0.65,
+        liquidity_impairment_months=24,
+        capital_mobility_constraint_months=24,
+        rebalance_locked_months=18,
+        classification="normal",
+        reasons=[],
+    )
+    classified = _classify(result)
+    assert classified.classification == "review-required"
+
+
+def test_cb3_severe_portfolio_loss_is_thesis_broken():
+    result = CrossBorderStressResult(
+        "CB3",
+        "Severe external asset availability constraint",
+        portfolio_return=-0.35,
+        liquid_portfolio_return=-0.40,
         frozen_asset_weight=0.35,
         qdii_haircut=0.65,
         liquidity_impairment_months=24,

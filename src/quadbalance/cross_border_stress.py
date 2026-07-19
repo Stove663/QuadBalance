@@ -132,11 +132,15 @@ def _classify(result: CrossBorderStressResult) -> CrossBorderStressResult:
         reasons.append("liquidity impairment persists for at least 12 months")
     if result.capital_mobility_constraint_months >= 12:
         reasons.append("capital mobility constraint persists for at least 12 months")
-    # thesis-broken requires portfolio outcomes only — scenario-definition durations
-    # (e.g. CB3 capital_mobility=24) must not alone force thesis-broken.
-    if result.portfolio_return < -0.30 or result.frozen_asset_weight >= 0.30:
+    # thesis-broken requires severe portfolio outcomes — large frozen weight alone
+    # (or scenario-definition durations like CB3 capital_mobility=24) is review.
+    if result.portfolio_return < -0.30:
         classification = "thesis-broken"
-    elif result.portfolio_return < -0.15 or result.liquidity_impairment_months >= 6 or result.frozen_asset_weight >= 0.10:
+    elif (
+        result.portfolio_return < -0.15
+        or result.liquidity_impairment_months >= 6
+        or result.frozen_asset_weight >= 0.10
+    ):
         classification = "review-required"
     if not reasons and classification != "normal":
         reasons.append("cross-border constraint materially affects portfolio usability")
