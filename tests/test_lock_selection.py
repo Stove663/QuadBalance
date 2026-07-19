@@ -7,7 +7,7 @@ import pandas as pd
 from quadbalance.config import StrategyConfig
 from quadbalance.metrics import PerformanceMetrics
 from quadbalance.simulator import QdiiExecutionMetrics, SimulationResult
-from quadbalance.sweep import prefer_lock_candidate
+from quadbalance.lock_selection import prefer_lock_candidate
 from quadbalance.validation import ValidationResult
 
 

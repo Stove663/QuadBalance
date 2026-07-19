@@ -264,6 +264,10 @@ def format_risk_summary_page(validation: ValidationResult) -> str:
 
 
 def material_from_validation(validation: ValidationResult) -> list[str]:
+    material = getattr(validation, "material_needs_review", None)
+    if material is not None:
+        return list(material)
+
     from quadbalance.lock_integrity import material_needs_review
 
     return material_needs_review(list(getattr(validation, "needs_review", None) or []))

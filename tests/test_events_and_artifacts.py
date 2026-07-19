@@ -9,7 +9,8 @@ import pandas as pd
 
 from quadbalance.artifacts import SCHEMA_VERSION, write_run_artifacts
 from quadbalance.config import StrategyConfig
-from quadbalance.metrics import classify_suitability, compute_metrics
+from quadbalance.metrics import compute_metrics
+from quadbalance.orchestration_helpers import build_profile_suitability
 from quadbalance.profile_thresholds import DEFAULT_INVESTOR_PROFILES
 from quadbalance.simulator import simulate, simulate_lifecycle
 from quadbalance.stress import run_stress_tests
@@ -76,10 +77,7 @@ def test_write_run_artifacts_bundle(tmp_path: Path):
     metrics = compute_metrics(sim, config, prices, 0.02, no_rebal)
     stress, _ = run_stress_tests(config, sim, prices)
     validation = evaluate_acceptance(config, metrics, {"cash": metrics, "60_40": metrics}, stress)
-    suitability = classify_suitability(config, metrics, 1.0, 0.0)
-    validation.profile_suitability = {
-        k: {"classification": v.classification, "reasons": v.reasons} for k, v in suitability.items()
-    }
+    validation.profile_suitability = build_profile_suitability(config, metrics, sim, None)
     validation.lifecycle_results = [
         simulate_lifecycle(prices, config, "withdrawal_4pct", withdrawal_rate=0.04, withdrawal_mode="annual")
     ]
@@ -87,6 +85,14 @@ def test_write_run_artifacts_bundle(tmp_path: Path):
     artifacts_dir = write_run_artifacts(
         tmp_path, config, sim, validation, DEFAULT_INVESTOR_PROFILES, validation.lifecycle_results
     )
+
+    manifest_path = artifacts_dir / "manifest.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == SCHEMA_VERSION
+    assert manifest["config_id"] == config.config_id
+    for key in ("config", "events", "metrics", "suitability", "equity_curve"):
+        assert key in manifest["artifact_paths"]
 
     for name in ("config.json", "events.json", "metrics.json", "suitability.json"):
         path = artifacts_dir / name

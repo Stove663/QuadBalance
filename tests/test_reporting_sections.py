@@ -11,6 +11,7 @@ from quadbalance.reporting_sections import (
     format_rebalance_execution_markdown,
     format_stress_summary_markdown,
     format_uncovered_risk_summary,
+    material_from_validation,
 )
 from quadbalance.simulator import LifecycleResult, RebalanceExecutionMetrics, SimulationResult
 from quadbalance.stress import StressResult
@@ -158,7 +159,9 @@ def test_format_uncovered_risk_summary_lists_key_themes():
         behavior_stress_results=[type("B", (), {"triggered": True})()],
         cross_border_stress_results=[type("C", (), {"classification": "review-required"})()],
         product_risk=None,
+        material_needs_review=["Criterion 3: stress S13 requires review"],
     )
+    assert material_from_validation(validation) == ["Criterion 3: stress S13 requires review"]
     text = format_uncovered_risk_summary(validation)
     assert "深回撤" in text
     assert "真实购买力" in text

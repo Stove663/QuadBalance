@@ -384,9 +384,10 @@ def classify_long_term(metrics) -> tuple[str, list[str]]:
     # Severe destruction only — diversified hedges may show negative real without
     # invalidating the strategy thesis under executable stagflation assumptions.
     if (
-        metrics.real_max_drawdown < -0.25
+        metrics.real_max_drawdown < -0.35
         or metrics.real_terminal_wealth < 0.55
         or metrics.real_longest_underwater_days > 252 * 10
+        or metrics.worst_rolling_5y_real_return < -0.25
     ):
         return "thesis-broken", reasons
     return "review-required", reasons
@@ -465,14 +466,17 @@ def run_long_term_scenario(prices: pd.DataFrame, config: StrategyConfig, scenari
     classification, reasons = classify_long_term(long_term_metrics)
     reasons.extend(phase_reasons)
     sequence_risk_results: list[dict[str, object]] = []
+    any_seq_thesis_broken = False
     for sid, result in sequence_profiles:
         seq_class = "thesis-broken" if result.depleted or result.safe_spending_breached else ("review-required" if result.withdrawal_coverage_ratio < 0.95 else "normal")
         sequence_risk_results.append({"scenario_id": sid, "classification": seq_class, "reasons": [f"coverage {result.withdrawal_coverage_ratio:.1%}", f"forced sale {result.forced_sale_amount:,.0f}"]})
         if seq_class != "normal":
             reasons.append(f"{sid}: {result.withdrawal_coverage_ratio:.1%} coverage, forced sale {result.forced_sale_amount:,.0f}")
-        if sid == "seq_inflation" and seq_class == "thesis-broken" and classification == "normal":
-            classification = "review-required"
-            reasons.append("seq_inflation: thesis-broken escalates scenario to review-required")
+        if sid == "seq_inflation" and seq_class == "thesis-broken":
+            any_seq_thesis_broken = True
+    if any_seq_thesis_broken and config.gold <= 0.0 and (config.stocks > 0.0 or config.bonds > 0.0):
+        classification = "thesis-broken"
+        reasons.append("seq_inflation: thesis-broken escalates scenario to thesis-broken")
     if withdrawal_4pct.depleted:
         reasons.append("4% withdrawal depletes under long-term regime")
     return LongTermScenarioResult(

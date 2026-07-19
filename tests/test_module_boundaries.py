@@ -7,8 +7,11 @@ import pandas as pd
 from quadbalance.asset_universe import ALL_SYMBOLS, BENCHMARK_BOND, BENCHMARK_CASH, BENCHMARK_CSI300, QDII_BACKUP_SYMBOLS
 from quadbalance.config import StrategyConfig
 from quadbalance.instrument_catalog import BACKTEST_PROXIES, qdii_pool_codes
+from quadbalance.lock_selection import prefer_lock_candidate
+from quadbalance.orchestration_helpers import assess_product_risk, build_profile_suitability
 from quadbalance.portfolio_templates import ALLOCATION_VARIANTS
 from quadbalance.reporting_sections import format_s4_path_markdown
+from quadbalance.sweep_artifacts import sweep_artifact_paths, sweep_validation_projection
 from quadbalance.sweep_constants import DEFAULT_INFLATION_ANN, STRATEGY_LOCK_FILENAME, SWEEP_RESULTS_FILENAME
 from quadbalance.asset_universe import SWEEP_STOCK_SUB_SPLITS
 from quadbalance.sweep_space import generate_sweep_configs, SWEEP_BOND_VARIANTS, SWEEP_DCA_METHODS, SWEEP_REBALANCE_THRESHOLDS
@@ -85,3 +88,17 @@ def test_strategy_config_fills_default_qdii_caps():
     )
     assert set(cfg.qdii_daily_caps) == set(qdii_pool_codes())
     assert all(v > 0 for v in cfg.qdii_daily_caps.values())
+
+
+def test_lock_selection_is_owned_by_lock_selection_module():
+    assert prefer_lock_candidate.__module__ == "quadbalance.lock_selection"
+
+
+def test_orchestration_helpers_own_shared_sweep_concerns():
+    assert assess_product_risk.__module__ == "quadbalance.orchestration_helpers"
+    assert build_profile_suitability.__module__ == "quadbalance.orchestration_helpers"
+
+
+def test_sweep_projection_helpers_expose_artifact_paths_and_validation_fields():
+    assert sweep_artifact_paths.__module__ == "quadbalance.sweep_artifacts"
+    assert sweep_validation_projection.__module__ == "quadbalance.sweep_artifacts"
