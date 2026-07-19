@@ -21,6 +21,7 @@ from quadbalance.product_risk import ProductRiskSummary
 from quadbalance.simulator import SimulationResult, simulate
 from quadbalance.stress import S4PathResult, StressResult, run_stress_tests
 from quadbalance.validation import ValidationResult, evaluate_acceptance
+from quadbalance.sweep_constants import ARTIFACT_MANIFEST_FILENAME, ARTIFACTS_DIRNAME, SWEEP_RESULTS_FILENAME
 
 RobustnessVerdict = Literal["robust", "sensitive", "fragile", "thesis-broken"]
 
@@ -281,9 +282,9 @@ def collect_required_symbols(configs: list[StrategyConfig]) -> list[str]:
     return sorted(symbols)
 
 
-def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, validation_stage: str) -> dict[str, Any]:
+def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, validation_stage: str, artifacts_dir: Path | None = None) -> dict[str, Any]:
     qdii = sim_result.qdii_metrics
-    return {
+    row = {
         "config_id": config.config_id,
         "allocation_name": config.allocation_name,
         "bond_variant": config.bond_variant,
@@ -357,6 +358,10 @@ def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, st
         "product_risk_score": getattr(product_risk, "weighted_score", None),
         "product_risk_classification": getattr(product_risk, "worst_classification", ""),
     }
+    if artifacts_dir is not None:
+        row["artifact_manifest"] = str(artifacts_dir / ARTIFACT_MANIFEST_FILENAME)
+        row["artifact_bundle"] = str(artifacts_dir)
+    return row
 
 
 def _write_sensitivity_outputs(output_dir: Path, prices: pd.DataFrame, config: StrategyConfig) -> None:
@@ -406,7 +411,7 @@ def _run_one_config(
     if screening_failures:
         validation.passed = False
         validation.failure_reasons = screening_failures
-        row = _build_sweep_row(config, sim_result, metrics, validation, [], [], [], [], None, "screened-out")
+        row = _build_sweep_row(config, sim_result, metrics, validation, [], [], [], [], None, "screened-out", None)
         return row, validation, config, sim_result, True
 
     stress_results, _ = run_stress_tests(config, sim_result, prices, backup_prices=backup_prices)
@@ -434,7 +439,8 @@ def _run_one_config(
     validation.benchmark_comparison = benchmark_comparison(metrics, benchmarks)
     validation.profile_suitability = _build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
 
-    row = _build_sweep_row(config, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, "deep-validated")
+    artifacts_dir = None
+    row = _build_sweep_row(config, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, "deep-validated", artifacts_dir)
     return row, validation, config, sim_result, False
 
 
@@ -501,6 +507,7 @@ def run_sweep(
                             or getattr(validation, "needs_review", None)
                             or []
                         ),
+                        "artifacts_dir": str(output_dir / "artifacts"),
                     }
                 )
 
@@ -539,7 +546,9 @@ def run_sweep(
             df.loc[df["config_id"] == config.config_id, "material_needs_review"] = "; ".join(
                 getattr(validation, "material_needs_review", []) or []
             )
-            df.to_csv(output_dir / "sweep_results.csv", index=False)
+            df.loc[df["config_id"] == config.config_id, "artifact_manifest"] = str(output_dir / ARTIFACTS_DIRNAME / ARTIFACT_MANIFEST_FILENAME)
+            df.loc[df["config_id"] == config.config_id, "artifact_bundle"] = str(output_dir / ARTIFACTS_DIRNAME)
+            df.to_csv(output_dir / SWEEP_RESULTS_FILENAME, index=False)
         return df, validation, config
 
     # Rank once; only evaluate LT for the top few candidates.

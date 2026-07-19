@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -36,7 +37,15 @@ from quadbalance.reporting_sections import (
 from quadbalance.simulator import SimulationResult
 from quadbalance.reporting_sections import format_s4_path_markdown
 from quadbalance.stress import S4PathResult
+from quadbalance.sweep_constants import ARTIFACT_MANIFEST_FILENAME, ARTIFACTS_DIRNAME
 from quadbalance.validation import ValidationResult
+
+
+def _load_manifest(output_path: Path) -> dict[str, object] | None:
+    manifest_path = output_path.parent / ARTIFACTS_DIRNAME / ARTIFACT_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 DISCLAIMER = (
     "Historical performance does not guarantee future results. "
@@ -59,6 +68,7 @@ def generate_lock_document(
 ) -> None:
     m = validation.metrics
     stock_weights = config.stock_weights
+    manifest = _load_manifest(output_path)
     lines = [
         "# Strategy Lock Document",
         "",
@@ -68,6 +78,19 @@ def generate_lock_document(
         f"**Configuration ID:** {config.config_id}",
         f"**Status:** {lock_status}",
         f"**Lockable:** {'yes' if getattr(validation, 'lockable', False) else 'no'}",
+    ]
+    if manifest is not None:
+        lines.extend([
+            "",
+            "## Run Manifest",
+            "",
+            f"- Generated at: {manifest.get('generated_at', '')}",
+            f"- Output directory: {manifest.get('output_dir', '')}",
+            f"- Validation passed: {manifest.get('validation_passed', False)}",
+            f"- Lockable: {manifest.get('lockable', False)}",
+            f"- Artifact bundle: {manifest.get('artifacts_dir', '')}",
+        ])
+    lines.extend([
         "",
         f"**Asset channel:** 场外基金 (off-exchange)",
         "",
@@ -131,7 +154,7 @@ def generate_lock_document(
         "",
         format_fee_assumptions_markdown(),
         format_sign_off_markdown(getattr(validation, "sign_off", None)),
-    ]
+    ])
     if sim_result.qdii_metrics is not None:
         qm = sim_result.qdii_metrics
         lines.extend(["## QDII Execution", "", f"| Metric | Value |", f"|--------|-------|", f"| QDII fill rate | {qm.qdii_fill_rate:.1%} |", f"| Avg pending cash | {qm.avg_pending_cash:,.0f} CNY |", f"| Max pending cash | {qm.max_pending_cash:,.0f} CNY |", f"| Days with pending cash | {qm.pending_cash_days} |", f"| Avg QDII weight gap | {qm.avg_qdii_weight_gap:+.2%} |", ""])

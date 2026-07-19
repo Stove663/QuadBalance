@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from quadbalance.lock_selection import RETURN_EDGE_BP, _as_bundle, prefer_lock_candidate
-from quadbalance.sweep_constants import LOCK_SHORTLIST_JSON, LOCK_SHORTLIST_MD
+from quadbalance.sweep_constants import ARTIFACT_MANIFEST_FILENAME, ARTIFACTS_DIRNAME, LOCK_SHORTLIST_JSON, LOCK_SHORTLIST_MD
 
 STEP_DOWN_ALLOCATION = "25-25-25-25"
 SHORTLIST_SCHEMA_VERSION = 1
@@ -108,6 +108,12 @@ def build_pros_cons(
 def _entry_payload(role: str, bundle: dict[str, Any], primary_view: dict[str, Any] | None, shared: list[str]) -> dict[str, Any]:
     view = _view(bundle)
     pc = build_pros_cons(role=role, view=view, primary=primary_view, shared_reviews=shared)
+    artifacts_dir = bundle.get("artifacts_dir")
+    artifact_manifest = None
+    artifact_bundle = None
+    if artifacts_dir is not None:
+        artifact_bundle = str(artifacts_dir)
+        artifact_manifest = str(Path(artifacts_dir) / ARTIFACT_MANIFEST_FILENAME)
     return {
         "role": role,
         "config_id": view["config_id"],
@@ -118,6 +124,8 @@ def _entry_payload(role: str, bundle: dict[str, Any], primary_view: dict[str, An
         "pending_cash_days": view["pending_cash_days"],
         "lockable": False,
         "material_needs_review": view["material_needs_review"],
+        "artifact_manifest": artifact_manifest,
+        "artifact_bundle": artifact_bundle,
         "pros": pc["pros"],
         "cons": pc["cons"],
         "bundle": bundle,
@@ -146,6 +154,8 @@ def build_return_seeking_shortlist(
             "roles": [],
             "skipped": [{"role": "primary", "reason": "no soft-pass candidates"}],
             "shared_material_reviews": [],
+            "artifact_manifest": None,
+            "artifact_bundle": None,
         }
 
     max_ret = max(v["annualized_return"] for _, v in views)
@@ -203,6 +213,9 @@ def build_return_seeking_shortlist(
         "roles": roles,
         "skipped": skipped,
         "shared_material_reviews": shared,
+        "artifact_manifest": str(Path(primary_bundle.get("artifacts_dir")) / ARTIFACT_MANIFEST_FILENAME) if primary_bundle.get("artifacts_dir") else None,
+        "artifact_bundle": str(primary_bundle.get("artifacts_dir")) if primary_bundle.get("artifacts_dir") else None,
+        "artifacts_dir": primary_bundle.get("artifacts_dir"),
     }
 
 
@@ -211,12 +224,15 @@ def shortlist_public_payload(shortlist: dict[str, Any]) -> dict[str, Any]:
     roles = []
     for role in shortlist.get("roles", []):
         roles.append({k: v for k, v in role.items() if k != "bundle"})
+    artifacts_dir = shortlist.get("artifacts_dir")
     return {
         "schema_version": shortlist.get("schema_version", SHORTLIST_SCHEMA_VERSION),
         "preference": shortlist.get("preference", "return_pending"),
         "roles": roles,
         "skipped": list(shortlist.get("skipped", [])),
         "shared_material_reviews": list(shortlist.get("shared_material_reviews", [])),
+        "artifact_manifest": str(Path(artifacts_dir) / ARTIFACT_MANIFEST_FILENAME) if artifacts_dir else None,
+        "artifact_bundle": str(artifacts_dir) if artifacts_dir else None,
     }
 
 
@@ -250,6 +266,7 @@ def format_lock_shortlist_markdown(shortlist: dict[str, Any]) -> str:
                 f"- **max drawdown:** {role['max_drawdown']:.2%}",
                 f"- **pending_cash_days:** {role['pending_cash_days']}",
                 f"- **lockable:** {role['lockable']}",
+                f"- **artifact manifest:** `{role.get('artifact_manifest') or 'n/a'}`",
                 "",
                 "### Pros",
                 "",

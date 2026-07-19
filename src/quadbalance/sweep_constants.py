@@ -7,4 +7,6 @@ SWEEP_RESULTS_FILENAME = "sweep_results.csv"
 STRATEGY_LOCK_FILENAME = "strategy-lock.md"
 LOCK_SHORTLIST_JSON = "lock-shortlist.json"
 LOCK_SHORTLIST_MD = "lock-shortlist.md"
+ARTIFACT_MANIFEST_FILENAME = "manifest.json"
+ARTIFACTS_DIRNAME = "artifacts"
 DEFAULT_INFLATION_ANN = 0.03

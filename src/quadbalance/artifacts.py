@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from quadbalance.config import StrategyConfig
+from quadbalance.sweep_constants import ARTIFACT_MANIFEST_FILENAME, ARTIFACTS_DIRNAME
 from quadbalance.profile_thresholds import (
     InvestorProfile,
     overridden_fields,
@@ -19,6 +21,21 @@ from quadbalance.simulator import LifecycleResult, SimulationEvent, SimulationRe
 from quadbalance.validation import ValidationResult
 
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class RunArtifactManifest:
+    schema_version: int
+    config_id: str
+    generated_at: str
+    output_dir: str
+    artifacts_dir: str
+    validation_passed: bool
+    lockable: bool
+    needs_review: list[str] = field(default_factory=list)
+    material_needs_review: list[str] = field(default_factory=list)
+    metric_snapshot: dict[str, float] = field(default_factory=dict)
+    artifact_paths: dict[str, str] = field(default_factory=dict)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -124,7 +141,7 @@ def write_run_artifacts(
     lifecycle_results: list[LifecycleResult] | None = None,
 ) -> Path:
     """Emit artifacts bundle including equity_curve for GUI charts."""
-    artifacts_dir = output_dir / "artifacts"
+    artifacts_dir = output_dir / ARTIFACTS_DIRNAME
     overrides = overridden_fields(investor_profiles)
     effective = {p.profile_id: profile_to_dict(p) for p in investor_profiles}
 
@@ -146,14 +163,16 @@ def write_run_artifacts(
         "effective_profile_thresholds": effective,
         "overridden_profile_fields": overrides,
     }
-    _write_json(artifacts_dir / "config.json", config_payload)
+    config_path = artifacts_dir / "config.json"
+    _write_json(config_path, config_payload)
 
     events: list[dict[str, Any]] = [_event_to_dict(e) for e in sim_result.events]
     for lr in lifecycle_results or validation.lifecycle_results:
         events.extend(_event_to_dict(e) for e in lr.events)
     events.sort(key=lambda e: (e.get("date") or "", e.get("event_type") or ""))
+    events_path = artifacts_dir / "events.json"
     _write_json(
-        artifacts_dir / "events.json",
+        events_path,
         {"schema_version": SCHEMA_VERSION, "config_id": config.config_id, "events": events},
     )
 
@@ -197,7 +216,8 @@ def write_run_artifacts(
             for lr in (lifecycle_results or validation.lifecycle_results)
         ],
     }
-    _write_json(artifacts_dir / "metrics.json", metrics_payload)
+    metrics_path = artifacts_dir / "metrics.json"
+    _write_json(metrics_path, metrics_payload)
 
     suitability_payload = {
         "schema_version": SCHEMA_VERSION,
@@ -211,7 +231,35 @@ def write_run_artifacts(
             for profile_id, payload in validation.profile_suitability.items()
         },
     }
-    _write_json(artifacts_dir / "suitability.json", suitability_payload)
-    write_equity_curve_artifact(artifacts_dir, config.config_id, sim_result.daily_values)
-    write_stress_summary_artifact(artifacts_dir, config.config_id, validation)
+    suitability_path = artifacts_dir / "suitability.json"
+    _write_json(suitability_path, suitability_payload)
+    equity_path = write_equity_curve_artifact(artifacts_dir, config.config_id, sim_result.daily_values)
+    stress_path = write_stress_summary_artifact(artifacts_dir, config.config_id, validation)
+
+    manifest = RunArtifactManifest(
+        schema_version=SCHEMA_VERSION,
+        config_id=config.config_id,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        output_dir=str(output_dir),
+        artifacts_dir=str(artifacts_dir),
+        validation_passed=validation.passed,
+        lockable=getattr(validation, "lockable", False),
+        needs_review=list(getattr(validation, "needs_review", None) or []),
+        material_needs_review=list(getattr(validation, "material_needs_review", None) or []),
+        metric_snapshot={
+            "annualized_return": m.annualized_return,
+            "max_drawdown": m.max_drawdown,
+            "real_annualized_return": m.real_annualized_return,
+            "real_terminal_wealth": m.real_terminal_wealth,
+        },
+        artifact_paths={
+            "config": str(config_path),
+            "events": str(events_path),
+            "metrics": str(metrics_path),
+            "suitability": str(suitability_path),
+            "equity_curve": str(equity_path),
+            **({"stress_summary": str(stress_path)} if stress_path is not None else {}),
+        },
+    )
+    _write_json(artifacts_dir / ARTIFACT_MANIFEST_FILENAME, asdict(manifest))
     return artifacts_dir
