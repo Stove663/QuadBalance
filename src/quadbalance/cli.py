@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from quadbalance.sweep import run_sweep
+from quadbalance.sweep_constants import LOCK_SHORTLIST_MD, STRATEGY_LOCK_FILENAME
 
 
 def main() -> None:
@@ -39,10 +40,16 @@ def main() -> None:
         help="JSON file with per-profile threshold overrides merged onto built-in defaults",
     )
     parser.add_argument(
+        "--lock-config-id",
+        type=str,
+        default=None,
+        help="After shortlist (or among passing rows), lock this config_id; requires sign-off when material reviews remain",
+    )
+    parser.add_argument(
         "--sign-off-reviewer",
         type=str,
         default=None,
-        help="If no naturally lockable config, lock best soft-pass candidate with this reviewer sign-off",
+        help="Reviewer identity for human sign-off when locking a soft-pass shortlist/passing config",
     )
     parser.add_argument(
         "--sign-off-rationale",
@@ -54,6 +61,9 @@ def main() -> None:
 
     if bool(args.sign_off_reviewer) != bool(args.sign_off_rationale):
         parser.error("--sign-off-reviewer and --sign-off-rationale must be supplied together")
+    if args.lock_config_id and not (args.sign_off_reviewer and args.sign_off_rationale):
+        # Allow lock without sign-off only when naturally lockable; sweep enforces at activate time.
+        pass
 
     print("Loading data and running parameter sweep...")
     df, validation, config = run_sweep(
@@ -64,6 +74,7 @@ def main() -> None:
         profile_thresholds_path=args.profile_thresholds,
         sign_off_reviewer=args.sign_off_reviewer,
         sign_off_rationale=args.sign_off_rationale,
+        lock_config_id=args.lock_config_id,
     )
 
     passed = df["validation_passed"].sum()
@@ -71,19 +82,24 @@ def main() -> None:
     print(f"\nSweep complete: {passed}/{total} configurations passed validation")
     print(f"Results written to {args.output / 'sweep_results.csv'}")
 
+    shortlist_md = args.output / LOCK_SHORTLIST_MD
+    if shortlist_md.exists():
+        print(f"Lock shortlist: {shortlist_md}")
+
     if validation and config:
-        print(f"Strategy lock document: {args.output / 'strategy-lock.md'}")
+        print(f"Strategy lock document: {args.output / STRATEGY_LOCK_FILENAME}")
         print(f"Locked configuration: {config.config_id}")
         print(f"Run artifacts: {args.output / 'artifacts'}")
         print(f"Proxy sensitivity: {args.output / 'proxy_sensitivity.csv'}")
         print(f"Segment metrics: {args.output / 'segment_metrics.csv'}")
     else:
-        print("No configuration passed all acceptance criteria.")
-        best = df.loc[df["annualized_return"].idxmax()]
-        print(
-            f"Best by return: {best['config_id']} "
-            f"({best['annualized_return']:.2%} ann., {best['max_drawdown']:.2%} MDD)"
-        )
+        print("No configuration locked.")
+        if "annualized_return" in df.columns and len(df):
+            best = df.loc[df["annualized_return"].idxmax()]
+            print(
+                f"Best by return: {best['config_id']} "
+                f"({best['annualized_return']:.2%} ann., {best['max_drawdown']:.2%} MDD)"
+            )
 
 
 if __name__ == "__main__":

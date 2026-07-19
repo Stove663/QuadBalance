@@ -1,38 +1,4 @@
-# strategy-lock-registry
-
-## Purpose
-
-Define the immutable local strategy-lock registry that stores append-only lock history and self-contained active-lock snapshots for the personal workbench.
-
-## Requirements
-
-### Requirement: Immutable strategy lock history
-
-The system SHALL persist strategy locks in a local SQLite store. Creating a new active lock MUST retain all previous locks (append-only history) and MUST clear the active flag on the previously active lock rather than deleting it.
-
-#### Scenario: Relock archives previous active lock
-
-- **WHEN** an active lock exists for configuration A
-- **AND** the user activates a new lock for configuration B
-- **THEN** configuration B is the sole active lock
-- **AND** configuration A remains stored with inactive status
-- **AND** no lock row is deleted
-
-### Requirement: Self-contained active lock snapshot
-
-Each lock record MUST store at least: lock timestamp, `config_id`, path to the originating run directory, intended profile id when applicable, and a JSON snapshot that is sufficient to reconstruct live targets without consulting mutable code defaults. The snapshot MUST include allocation weights, bond variant, DCA method, rebalance threshold, stock sub-split, **resolved instrument symbols and target weights**, and a metrics/suitability summary for display. Exactly one lock MAY be active at a time; zero active locks is allowed before the first lock.
-
-#### Scenario: Active lock readable without re-run
-
-- **WHEN** the user opens the workbench with an active lock
-- **THEN** the UI can display the locked `config_id`, target quadrant weights, and instrument targets from the stored snapshot
-- **AND** does not require re-executing validation to show that snapshot
-
-#### Scenario: Targets survive missing run directory
-
-- **WHEN** an active lock’s run directory has been deleted
-- **THEN** the workbench can still display target weights from the lock snapshot
-- **AND** artifact-dependent detail views may report that run files are missing
+## MODIFIED Requirements
 
 ### Requirement: Lock from completed validation with optional config pick
 

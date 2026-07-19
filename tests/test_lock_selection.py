@@ -37,6 +37,9 @@ def _bundle(
     qdii_fill: float = 0.95,
     classification: str = "caution",
     stock_sub_split: str = "60-40",
+    pending_cash_days: int = 0,
+    lockable: bool = False,
+    needs_review: list[str] | None = None,
 ) -> tuple:
     config = StrategyConfig(
         allocation_name="25-25-25-25",
@@ -61,6 +64,9 @@ def _bundle(
         benchmark_comparison={},
         stress_results=[],
         profile_suitability={"accumulation": {"classification": classification, "reasons": []}},
+        needs_review=list(needs_review or []),
+        lockable=lockable,
+        material_needs_review=list(needs_review or []),
     )
     result = SimulationResult(
         config_id=config.config_id,
@@ -69,7 +75,7 @@ def _bundle(
         effective_start="2019-01-01",
         effective_end="2020-01-01",
         instrument_starts={},
-        qdii_metrics=QdiiExecutionMetrics(qdii_fill, 0.0, 0.0, 0, 0.0),
+        qdii_metrics=QdiiExecutionMetrics(qdii_fill, 0.0, 0.0, pending_cash_days, 0.0),
     )
     return validation, config, result
 
@@ -115,3 +121,17 @@ def test_no_intended_profile_skips_suitability_rank():
     candidate = _bundle("bbb", classification="unsuitable", annualized_return=0.12)
     chosen = prefer_lock_candidate(current, candidate, None)
     assert chosen[1].allocation_name == "bbb"
+
+
+def test_near_tie_return_prefers_lower_pending():
+    current = _bundle("high-pend", annualized_return=0.1042, pending_cash_days=645)
+    candidate = _bundle("low-pend", annualized_return=0.1026, pending_cash_days=607)
+    chosen = prefer_lock_candidate(current, candidate, None)
+    assert chosen[1].allocation_name == "low-pend"
+
+
+def test_large_return_edge_prefers_higher_return_despite_pending():
+    current = _bundle("low-ret", annualized_return=0.08, pending_cash_days=100)
+    candidate = _bundle("high-ret", annualized_return=0.09, pending_cash_days=600)
+    chosen = prefer_lock_candidate(current, candidate, None)
+    assert chosen[1].allocation_name == "high-ret"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from quadbalance.behavior_stress import BehaviorStressResult
 from quadbalance.cross_border_stress import CrossBorderStressResult
+from quadbalance.lock_selection import LOCK_SELECTION_RANKING_KEYS
 from quadbalance.path_stress import PathStressResult
 from quadbalance.product_risk import ProductRiskSummary
 from quadbalance.profile_thresholds import InvestorProfile
@@ -23,16 +24,7 @@ RISK_MAP_ORDER = [
     ("product", "产品层实现风险"),
 ]
 
-
-LOCK_SELECTION_KEYS = [
-    "lockable over soft-pass (material needs_review without sign-off excluded)",
-    "suitability rank for intended profile (suitable > caution > unsuitable) when supplied",
-    "stocks sub-split risk-budget preference (60-40 over 40-60 when return edge < 50bp or extra CB reviews)",
-    "higher annualized return",
-    "lower absolute maximum drawdown",
-    "higher QDII fill rate",
-    "lexicographic configuration ID ascending",
-]
+LOCK_SELECTION_KEYS = list(LOCK_SELECTION_RANKING_KEYS)
 
 # Stress IDs evaluated via closed-form / formula shocks (not full simulate paths).
 FORMULA_STRESS_IDS = frozenset({

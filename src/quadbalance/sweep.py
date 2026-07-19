@@ -450,6 +450,7 @@ def run_sweep(
     profile_thresholds_path: Path | None = None,
     sign_off_reviewer: str | None = None,
     sign_off_rationale: str | None = None,
+    lock_config_id: str | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     configs = generate_sweep_configs()
@@ -487,10 +488,19 @@ def run_sweep(
                         "annualized_return": validation.metrics.annualized_return,
                         "max_drawdown": validation.metrics.max_drawdown,
                         "qdii_fill_rate": float(getattr(qdii, "qdii_fill_rate", 0.0) or 0.0),
+                        "pending_cash_days": int(getattr(qdii, "pending_cash_days", 0) or 0)
+                        if qdii is not None
+                        else 0,
                         "config_id": config.config_id,
+                        "allocation_name": config.allocation_name,
                         "profile_suitability": validation.profile_suitability,
                         "lockable": getattr(validation, "lockable", False),
                         "stock_sub_split": config.stock_sub_split,
+                        "material_needs_review": list(
+                            getattr(validation, "material_needs_review", None)
+                            or getattr(validation, "needs_review", None)
+                            or []
+                        ),
                     }
                 )
 
@@ -579,26 +589,114 @@ def run_sweep(
         )
         soft_pass_after_lt.append({**best_bundle, "validation": validation, "lockable": False})
 
-    # No naturally lockable config: optional human sign-off unlocks best soft-pass candidate.
-    if soft_pass_after_lt and sign_off_reviewer and sign_off_rationale:
-        best_soft: dict[str, Any] | None = None
-        for bundle in soft_pass_after_lt:
-            best_soft = prefer_lock_candidate(best_soft, bundle, intended_profile)
-        assert best_soft is not None
-        validation = best_soft["validation"]
-        config = best_soft["config"]
-        sim_result = best_soft["sim_result"]
+    # No naturally lockable config: build return-seeking shortlist; lock only on explicit pick + sign-off.
+    from quadbalance.lock_shortlist import build_return_seeking_shortlist, write_lock_shortlist_artifacts
+
+    soft_pool = [
+        b
+        for b in passing_bundles
+        if getattr(b["validation"], "passed", False) and not bool(getattr(b["validation"], "lockable", False))
+    ]
+    # Prefer LT-enriched bundles when present.
+    by_id = {b["config"].config_id: b for b in soft_pool}
+    for b in soft_pass_after_lt:
+        by_id[b["config"].config_id] = b
+    soft_pool = list(by_id.values())
+
+    shortlist = build_return_seeking_shortlist(soft_pool, intended_profile=intended_profile)
+
+    # Ensure LT for shortlist members (capped to role count).
+    for role in shortlist.get("roles", []):
+        bundle = role.get("bundle")
+        if bundle is None:
+            continue
+        validation = bundle["validation"]
+        config = bundle["config"]
+        if getattr(validation, "long_term_results", None):
+            continue
+        print(f"Shortlist LT for {role['role']}: {config.config_id}")
+        validation.long_term_results = run_long_term_stress_tests(config, prices)
+        apply_long_term_lock_vetoes(validation)
+        if any(getattr(r, "classification", "") == "thesis-broken" for r in validation.long_term_results):
+            validation.passed = False
+            validation.lockable = False
+            role["lockable"] = False
+            role["cons"] = list(role.get("cons") or []) + ["Long-term stress thesis-broken after shortlist LT"]
+            if "config_id" in df.columns and "validation_passed" in df.columns:
+                df.loc[df["config_id"] == config.config_id, "validation_passed"] = False
+                df.loc[df["config_id"] == config.config_id, "lockable"] = False
+                df.to_csv(output_dir / "sweep_results.csv", index=False)
+            continue
+        role["material_needs_review"] = list(getattr(validation, "material_needs_review", []) or [])
+        by_id[config.config_id] = {**bundle, "validation": validation, "lockable": False}
+
+    # Drop thesis-broken roles and rebuild public artifact from surviving bundles.
+    surviving = [
+        role["bundle"]
+        for role in shortlist.get("roles", [])
+        if role.get("bundle") is not None and getattr(role["bundle"]["validation"], "passed", False)
+    ]
+    shortlist = build_return_seeking_shortlist(surviving or soft_pool, intended_profile=intended_profile)
+    json_path, md_path = write_lock_shortlist_artifacts(output_dir, shortlist)
+    print(
+        f"Lock shortlist written: {md_path.name} ({len(shortlist.get('roles', []))} roles); "
+        f"JSON: {json_path.name}"
+    )
+
+    def _apply_sign_off_and_lock(bundle: dict[str, Any]) -> tuple | None:
+        validation = bundle["validation"]
+        config = bundle["config"]
+        sim_result = bundle["sim_result"]
+        if not getattr(validation, "long_term_results", None):
+            validation.long_term_results = run_long_term_stress_tests(config, prices)
+            apply_long_term_lock_vetoes(validation)
+        if any(getattr(r, "classification", "") == "thesis-broken" for r in validation.long_term_results):
+            print(f"Cannot lock {config.config_id}: long-term thesis-broken")
+            return None
         material = material_needs_review(list(validation.needs_review))
-        validation.sign_off = HumanSignOff(
-            reviewer=sign_off_reviewer,
-            rationale=sign_off_rationale,
-            acknowledged_items=tuple(material),
-        )
+        if material and not (sign_off_reviewer and sign_off_rationale):
+            print(
+                f"Cannot lock {config.config_id}: material reviews remain "
+                "(supply --sign-off-reviewer/--sign-off-rationale)"
+            )
+            return None
+        if material:
+            validation.sign_off = HumanSignOff(
+                reviewer=sign_off_reviewer,
+                rationale=sign_off_rationale,
+                acknowledged_items=tuple(material),
+            )
         validation.material_needs_review = material
         validation.lockable = compute_lockable(validation.passed, validation.needs_review, validation.sign_off)
-        if validation.lockable:
-            print(f"Locking {config.config_id} with human sign-off by {sign_off_reviewer}")
-            return _finalize_lock(best_soft, validation, config, sim_result)
+        if not validation.lockable:
+            print(f"Cannot lock {config.config_id}: still not lockable after sign-off check")
+            return None
+        print(f"Locking {config.config_id} (sign-off={'yes' if validation.sign_off else 'no'})")
+        return _finalize_lock(bundle, validation, config, sim_result)
 
-    print("No lockable configuration after LT (use --sign-off-reviewer/--sign-off-rationale to force)")
+    if lock_config_id:
+        target = by_id.get(lock_config_id)
+        if target is None:
+            for b in passing_bundles:
+                if b["config"].config_id == lock_config_id and getattr(b["validation"], "passed", False):
+                    target = b
+                    break
+        if target is None:
+            print(f"No passing configuration matching --lock-config-id={lock_config_id}")
+            return df, None, None
+        locked = _apply_sign_off_and_lock(target)
+        if locked is not None:
+            return locked
+        return df, None, None
+
+    if sign_off_reviewer and sign_off_rationale and not lock_config_id:
+        print(
+            "Sign-off provided without --lock-config-id; shortlist written but no auto-lock. "
+            "Re-run with --lock-config-id set to a shortlist config_id."
+        )
+    else:
+        print(
+            "No lockable configuration after LT. Review lock-shortlist.md and pick with "
+            "--lock-config-id plus --sign-off-reviewer/--sign-off-rationale when needed."
+        )
     return df, None, None
