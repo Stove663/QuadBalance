@@ -164,27 +164,28 @@ The strategy lock document SHALL include an Investor Profile Suitability section
 
 ### Requirement: Project scope alignment
 
-The strategy SHALL align with the project goal of supporting a personal long-term investment workflow with three phases: a core engine for expected return, backtest, and stress testing; a GUI in a later phase; and a ledger in a later phase for recording buys, sells, and rebalancing activity.
+The strategy SHALL align with the project goal of supporting a personal long-term investment workflow: a core engine for expected return, backtest, and stress testing (Phase 1); a local personal browser workbench that includes validation UI, immutable strategy-lock registry, minimal personal ledger, and threshold-gated rebalance guidance (Phase 2); and optional later deepening of ledger/execution tooling without requiring brokerage automation.
 
-The first-phase implementation SHALL focus on data-driven backtesting, deterministic stress testing, and suitability assessment before GUI or ledger work begins.
+The first-phase implementation remains the data-driven backtesting, deterministic stress testing, and suitability assessment engine. Phase 2 MAY proceed once those engine capabilities and run artifacts exist.
 
-The current codebase SHALL remain modular across data loading, configuration, simulation, metrics, suitability evaluation, reporting, and scenario definitions so that later GUI and ledger work can be added without rewriting the core engine.
+The codebase SHALL remain modular across data loading, configuration, simulation, metrics, suitability evaluation, reporting, scenario definitions, lock registry, ledger, and guidance so the workbench can consume the engine without rewriting it.
 
-The report outputs SHALL be standardized as CSV plus markdown in the first phase, while leaving JSON export and ledger-ingestion interfaces for later phases.
+Report outputs SHALL keep CSV plus markdown as human-facing engine reports, with JSON run artifacts as the primary machine interface for the workbench.
 
-The MVP implementation SHALL use daily backtest frequency, fixed-amount DCA, threshold-based rebalancing that uses new cash first, rule-driven suitability classification, and a backtest window of 15+ years when available.
+The MVP engine assumptions remain: daily backtest frequency, fixed-amount DCA, threshold-based rebalancing that uses new cash first, rule-driven suitability classification, and a backtest window of 15+ years when available.
 
-#### Scenario: Scope remains phased
+#### Scenario: Scope includes personal workbench phase
 
 - **WHEN** the project is planned or reviewed
-- **THEN** the core engine remains the first-phase deliverable
-- **AND** GUI and ledger capabilities are treated as later phases
+- **THEN** the core engine remains the Phase 1 deliverable
+- **AND** Phase 2 is defined as the personal browser workbench including minimal ledger and rebalance guidance
 - **AND** the strategy work does not require live brokerage integration or automated trading
 
+#### Scenario: Workbench consumes artifacts without engine rewrite
 
-
-
-
+- **WHEN** Phase 2 workbench features are added
+- **THEN** they consume stable run artifacts and engine entrypoints
+- **AND** they do not require rewriting the core simulation engine
 
 ### Requirement: Stocks sub-split as mechanical parameter
 

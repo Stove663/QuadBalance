@@ -72,9 +72,12 @@ def activate_lock(
     metrics_summary: dict[str, Any] | None = None,
     suitability_summary: dict[str, Any] | None = None,
     db_path: Path | None = None,
+    lockable: bool = True,
 ) -> StrategyLock:
     if not validation_passed:
         raise ValueError("Only configurations that passed validation may be locked")
+    if not lockable:
+        raise ValueError("Only lockable configurations may be activated (material needs_review requires sign-off)")
     snap = snapshot or build_lock_snapshot(
         config, metrics_summary=metrics_summary, suitability_summary=suitability_summary
     )

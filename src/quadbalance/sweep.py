@@ -269,10 +269,15 @@ def _build_profile_suitability(config: StrategyConfig, metrics: PerformanceMetri
 
 
 def collect_required_symbols(configs: list[StrategyConfig]) -> list[str]:
-    symbols: set[str] = set()
+    """Primary/alignment symbols only — QDII backups must not truncate the matrix."""
+    from quadbalance.asset_universe import PRICE_MATRIX_SYMBOLS, QDII_BACKUP_SYMBOLS
+
+    symbols: set[str] = set(PRICE_MATRIX_SYMBOLS)
     for config in configs:
         symbols.update(config.symbols())
-        symbols.update(config.simulation_symbols())
+    forbidden = symbols & set(QDII_BACKUP_SYMBOLS)
+    if forbidden:
+        raise ValueError(f"Alignment symbols must not include QDII backups: {sorted(forbidden)}")
     return sorted(symbols)
 
 
@@ -325,6 +330,19 @@ def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, st
         "validation_passed": validation.passed,
         "failure_reasons": "; ".join(validation.failure_reasons),
         "needs_review": "; ".join(getattr(validation, "needs_review", []) or []),
+        "material_needs_review": "; ".join(getattr(validation, "material_needs_review", []) or []),
+        "lockable": getattr(validation, "lockable", False),
+        "qdii_pending_days_gate": (
+            "fail"
+            if (getattr(qdii, "pending_cash_days", 0) or 0) > 252
+            else "pass"
+        ),
+        "qdii_weight_gap_gate": (
+            "fail"
+            if (getattr(qdii, "qdii_friction_months", 0) or 0) >= 12
+            and abs(getattr(qdii, "avg_qdii_weight_gap", 0.0) or 0.0) > 0.02
+            else "pass"
+        ),
         "boundary_macro": validation.boundary_classifications.get("macro", ""),
         "boundary_behavioral": validation.boundary_classifications.get("behavioral", ""),
         "boundary_real_return": validation.boundary_classifications.get("real_return", ""),
@@ -362,9 +380,10 @@ def _run_one_config(
     profile_thresholds_path: Path | None,
 ) -> tuple[dict[str, Any], ValidationResult, StrategyConfig, SimulationResult, bool] | None:
     print(
-        f"[{idx}/{total_configs}] Running {config.config_id} | "
+        f"[{idx}/{total_configs}] Started {config.config_id} | "
         f"alloc={config.allocation_name} bond={config.bond_variant} "
-        f"dca={config.dca_method} rebalance={config.rebalance_threshold:.0%}"
+        f"dca={config.dca_method} rebalance={config.rebalance_threshold:.0%}",
+        flush=True,
     )
     sim_result = simulate(prices, config, backup_prices=backup_prices)
     metrics = compute_metrics(sim_result, config, prices, risk_free_annual=risk_free_annual, inflation_annual=0.03)
@@ -392,7 +411,9 @@ def _run_one_config(
 
     stress_results, _ = run_stress_tests(config, sim_result, prices, backup_prices=backup_prices)
     path_results = run_path_stress_tests(config, prices, backup_prices=backup_prices)
-    behavior_results = run_behavior_stress_tests(sim_result, metrics)
+    behavior_results = run_behavior_stress_tests(
+        sim_result, metrics, path_results=path_results, stress_results=stress_results
+    )
     cross_border_results = run_cross_border_stress_tests(config)
     product_risk = assess_product_risk(config)
 
@@ -405,6 +426,8 @@ def _run_one_config(
         behavior_stress_results=behavior_results,
         cross_border_stress_results=cross_border_results,
         product_risk=product_risk,
+        qdii_metrics=sim_result.qdii_metrics,
+        rebalance_metrics=sim_result.rebalance_metrics,
     )
     # LT1–LT3 deferred to lock selection in run_sweep (skip for all sweep candidates).
     validation.long_term_results = []
@@ -425,6 +448,8 @@ def run_sweep(
     full_sensitivity: bool = False,
     intended_profile: str | None = None,
     profile_thresholds_path: Path | None = None,
+    sign_off_reviewer: str | None = None,
+    sign_off_rationale: str | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     configs = generate_sweep_configs()
@@ -464,36 +489,27 @@ def run_sweep(
                         "qdii_fill_rate": float(getattr(qdii, "qdii_fill_rate", 0.0) or 0.0),
                         "config_id": config.config_id,
                         "profile_suitability": validation.profile_suitability,
+                        "lockable": getattr(validation, "lockable", False),
+                        "stock_sub_split": config.stock_sub_split,
                     }
                 )
 
     df = pd.DataFrame(rows)
     df.to_csv(output_dir / "sweep_results.csv", index=False)
+    print(
+        f"Parallel sweep done: {len(df)} configs, "
+        f"{int(df['validation_passed'].sum()) if 'validation_passed' in df.columns else 0} passed, "
+        f"{int(df['lockable'].fillna(False).astype(bool).sum()) if 'lockable' in df.columns else 0} lockable before LT"
+    )
 
-    # Try lock candidates in preference order; long-term thesis-broken vetoes and tries next.
-    remaining = list(passing_bundles)
-    while remaining:
-        best_bundle: dict[str, Any] | None = None
-        for bundle in remaining:
-            best_bundle = prefer_lock_candidate(best_bundle, bundle, intended_profile)
-        assert best_bundle is not None
-        validation = best_bundle["validation"]
-        config = best_bundle["config"]
-        sim_result = best_bundle["sim_result"]
-        validation.long_term_results = run_long_term_stress_tests(config, prices)
-        if any(getattr(r, "classification", "") == "thesis-broken" for r in validation.long_term_results):
-            validation.passed = False
-            validation.failure_reasons = list(validation.failure_reasons) + [
-                f"Long-term stress thesis-broken: {r.scenario_id}"
-                for r in validation.long_term_results
-                if getattr(r, "classification", "") == "thesis-broken"
-            ]
-            if "config_id" in df.columns and "validation_passed" in df.columns:
-                df.loc[df["config_id"] == config.config_id, "validation_passed"] = False
-                df.to_csv(output_dir / "sweep_results.csv", index=False)
-            remaining = [b for b in remaining if b["config"].config_id != config.config_id]
-            continue
+    # Prefer lockable candidates; long-term thesis-broken / seq_inflation veto tries next.
+    # Cap LT attempts — each LT1–LT3 run is multi-decade and must not fan out over all soft-passes.
+    from quadbalance.lock_integrity import HumanSignOff, compute_lockable, material_needs_review
+    from quadbalance.validation import apply_long_term_lock_vetoes
 
+    MAX_LT_LOCK_ATTEMPTS = 3
+
+    def _finalize_lock(bundle: dict[str, Any], validation, config, sim_result) -> tuple:
         _generate_lock_document(config, sim_result, validation, output_dir / "strategy-lock.md", intended_profile=intended_profile)
         from quadbalance.artifacts import write_run_artifacts
         from quadbalance.profile_thresholds import DEFAULT_INVESTOR_PROFILES
@@ -508,6 +524,81 @@ def run_sweep(
         )
         if full_sensitivity:
             _write_sensitivity_outputs(output_dir, prices, config)
+        if "config_id" in df.columns and "lockable" in df.columns:
+            df.loc[df["config_id"] == config.config_id, "lockable"] = validation.lockable
+            df.loc[df["config_id"] == config.config_id, "material_needs_review"] = "; ".join(
+                getattr(validation, "material_needs_review", []) or []
+            )
+            df.to_csv(output_dir / "sweep_results.csv", index=False)
         return df, validation, config
 
+    # Rank once; only evaluate LT for the top few candidates.
+    ranked: list[dict[str, Any]] = []
+    pool = list(passing_bundles)
+    while pool:
+        best: dict[str, Any] | None = None
+        for bundle in pool:
+            best = prefer_lock_candidate(best, bundle, intended_profile)
+        assert best is not None
+        ranked.append(best)
+        pool = [b for b in pool if b["config"].config_id != best["config"].config_id]
+
+    soft_pass_after_lt: list[dict[str, Any]] = []
+    for attempt, best_bundle in enumerate(ranked[:MAX_LT_LOCK_ATTEMPTS], start=1):
+        validation = best_bundle["validation"]
+        config = best_bundle["config"]
+        sim_result = best_bundle["sim_result"]
+        print(
+            f"Lock selection LT attempt {attempt}/{min(MAX_LT_LOCK_ATTEMPTS, len(ranked))}: "
+            f"{config.config_id} (pre-LT lockable={getattr(validation, 'lockable', False)})"
+        )
+        validation.long_term_results = run_long_term_stress_tests(config, prices)
+        apply_long_term_lock_vetoes(validation)
+        if any(getattr(r, "classification", "") == "thesis-broken" for r in validation.long_term_results):
+            validation.passed = False
+            validation.lockable = False
+            validation.failure_reasons = list(validation.failure_reasons) + [
+                f"Long-term stress thesis-broken: {r.scenario_id}"
+                for r in validation.long_term_results
+                if getattr(r, "classification", "") == "thesis-broken"
+            ]
+            if "config_id" in df.columns and "validation_passed" in df.columns:
+                df.loc[df["config_id"] == config.config_id, "validation_passed"] = False
+                df.loc[df["config_id"] == config.config_id, "lockable"] = False
+                df.to_csv(output_dir / "sweep_results.csv", index=False)
+            print(f"  → LT thesis-broken; skipping")
+            continue
+
+        if validation.lockable:
+            print(f"  → lockable after LT; writing strategy-lock.md")
+            return _finalize_lock(best_bundle, validation, config, sim_result)
+
+        print(
+            f"  → soft-pass after LT "
+            f"(material reviews={len(getattr(validation, 'material_needs_review', []) or [])})"
+        )
+        soft_pass_after_lt.append({**best_bundle, "validation": validation, "lockable": False})
+
+    # No naturally lockable config: optional human sign-off unlocks best soft-pass candidate.
+    if soft_pass_after_lt and sign_off_reviewer and sign_off_rationale:
+        best_soft: dict[str, Any] | None = None
+        for bundle in soft_pass_after_lt:
+            best_soft = prefer_lock_candidate(best_soft, bundle, intended_profile)
+        assert best_soft is not None
+        validation = best_soft["validation"]
+        config = best_soft["config"]
+        sim_result = best_soft["sim_result"]
+        material = material_needs_review(list(validation.needs_review))
+        validation.sign_off = HumanSignOff(
+            reviewer=sign_off_reviewer,
+            rationale=sign_off_rationale,
+            acknowledged_items=tuple(material),
+        )
+        validation.material_needs_review = material
+        validation.lockable = compute_lockable(validation.passed, validation.needs_review, validation.sign_off)
+        if validation.lockable:
+            print(f"Locking {config.config_id} with human sign-off by {sign_off_reviewer}")
+            return _finalize_lock(best_soft, validation, config, sim_result)
+
+    print("No lockable configuration after LT (use --sign-off-reviewer/--sign-off-rationale to force)")
     return df, None, None

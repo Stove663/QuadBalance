@@ -26,7 +26,7 @@ from quadbalance.sweep import (
     run_behavior_stress_tests,
     run_path_stress_tests,
 )
-from quadbalance.validation import ValidationResult, evaluate_acceptance
+from quadbalance.validation import ValidationResult, apply_long_term_lock_vetoes, evaluate_acceptance
 
 
 def run_single_config(
@@ -39,10 +39,12 @@ def run_single_config(
     include_long_term: bool = True,
     prices: pd.DataFrame | None = None,
     backup_prices: dict[str, pd.Series] | None = None,
+    allow_soft_lock: bool = False,
 ) -> tuple[ValidationResult, StrategyConfig, Any]:
     """
     Deep-validate one configuration and write artifacts + strategy-lock.md under output_dir.
     Does not enumerate the sweep space.
+    Active lock document is written only when lockable (or allow_soft_lock=True for inspection).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if prices is None:
@@ -65,7 +67,9 @@ def run_single_config(
 
     stress_results, _ = run_stress_tests(config, sim_result, prices, backup_prices=backup_prices)
     path_results = run_path_stress_tests(config, prices, backup_prices=backup_prices)
-    behavior_results = run_behavior_stress_tests(sim_result, metrics)
+    behavior_results = run_behavior_stress_tests(
+        sim_result, metrics, path_results=path_results, stress_results=stress_results
+    )
     cross_border_results = run_cross_border_stress_tests(config)
     product_risk = assess_product_risk(config)
 
@@ -78,6 +82,8 @@ def run_single_config(
         behavior_stress_results=behavior_results,
         cross_border_stress_results=cross_border_results,
         product_risk=product_risk,
+        qdii_metrics=sim_result.qdii_metrics,
+        rebalance_metrics=sim_result.rebalance_metrics,
     )
     validation.benchmark_comparison = benchmark_comparison(metrics, benchmarks)
     validation.profile_suitability = _build_profile_suitability(
@@ -87,14 +93,33 @@ def run_single_config(
         validation.long_term_results = [
             run_long_term_scenario(prices, config, scenario) for scenario in LONG_TERM_SCENARIOS
         ]
+        apply_long_term_lock_vetoes(validation)
     else:
         validation.long_term_results = []
 
     from quadbalance.reporting import generate_lock_document
 
-    generate_lock_document(
-        config, sim_result, validation, output_dir / "strategy-lock.md", intended_profile=intended_profile
-    )
+    if validation.lockable or allow_soft_lock:
+        status = "locked" if validation.lockable else "validated-not-lockable"
+        generate_lock_document(
+            config,
+            sim_result,
+            validation,
+            output_dir / "strategy-lock.md",
+            intended_profile=intended_profile,
+            lock_status=status,
+            inflation_annual=0.03,
+        )
+    else:
+        (output_dir / "strategy-lock.md").write_text(
+            "# Strategy Lock Document\n\n"
+            f"**Status:** not-lockable\n\n"
+            f"Configuration `{config.config_id}` passed={validation.passed} but is not lockable "
+            f"without human sign-off. Material reviews:\n\n"
+            + "\n".join(f"- {item}" for item in validation.material_needs_review)
+            + "\n",
+            encoding="utf-8",
+        )
     write_run_artifacts(
         output_dir,
         config,
@@ -109,10 +134,13 @@ def run_single_config(
             {
                 "config_id": config.config_id,
                 "validation_passed": validation.passed,
+                "lockable": validation.lockable,
                 "failure_reasons": "; ".join(validation.failure_reasons),
                 "needs_review": "; ".join(validation.needs_review),
+                "material_needs_review": "; ".join(validation.material_needs_review),
                 "annualized_return": metrics.annualized_return,
                 "max_drawdown": metrics.max_drawdown,
+                "effective_start": sim_result.effective_start,
             }
         ]
     ).to_csv(output_dir / "sweep_results.csv", index=False)

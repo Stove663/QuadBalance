@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from quadbalance.benchmarks import BenchmarkResult
-from quadbalance.config import StrategyConfig
 from quadbalance.behavior_stress import BehaviorStressResult
+from quadbalance.config import StrategyConfig
 from quadbalance.cross_border_stress import CrossBorderStressResult, run_cross_border_stress_tests
+from quadbalance.lock_integrity import (
+    HumanSignOff,
+    compute_lockable,
+    material_needs_review,
+    qdii_quality_reviews,
+)
 from quadbalance.long_term_stress import LongTermScenarioResult
-from quadbalance.metrics import PerformanceMetrics, ProfileSuitability, classify_suitability
+from quadbalance.metrics import PerformanceMetrics, classify_suitability
 from quadbalance.path_stress import PathStressResult
 from quadbalance.product_risk import ProductRiskSummary
-from quadbalance.simulator import LifecycleResult
+from quadbalance.simulator import LifecycleResult, QdiiExecutionMetrics, RebalanceExecutionMetrics
 from quadbalance.stress import StressResult
 
+if TYPE_CHECKING:
+    from quadbalance.sweep import RobustnessSweepResult
+
 MAX_NAV_RECOVERY_DAYS = 252
-# Unrecovered drawdowns shallower than this are review-required, not hard fail.
+# Unrecovered drawdowns deeper than this remain hard fail; shallower stay review.
 SHALLOW_UNRECOVERED_MDD = -0.10
 
 
@@ -38,6 +48,39 @@ class ValidationResult:
     cross_border_stress_results: list[CrossBorderStressResult] = field(default_factory=list)
     product_risk: ProductRiskSummary | None = None
     needs_review: list[str] = field(default_factory=list)
+    lockable: bool = False
+    sign_off: HumanSignOff | None = None
+    material_needs_review: list[str] = field(default_factory=list)
+
+
+def apply_long_term_lock_vetoes(validation: ValidationResult) -> None:
+    """Escalate seq_inflation thesis-broken into material needs_review / lock veto."""
+    from dataclasses import replace
+
+    updated: list = []
+    for result in validation.long_term_results:
+        seq_rows = getattr(result, "sequence_risk_results", None) or []
+        new_result = result
+        for row in seq_rows:
+            if row.get("scenario_id") != "seq_inflation":
+                continue
+            if row.get("classification") != "thesis-broken":
+                continue
+            note = (
+                f"Criterion 3: long-term {result.scenario_id} seq_inflation thesis-broken "
+                "(inflation-escalating withdrawal)"
+            )
+            if note not in validation.needs_review:
+                validation.needs_review.append(note)
+            if result.classification == "normal":
+                reasons = list(result.threshold_reasons) + [
+                    "seq_inflation: thesis-broken escalates scenario to review-required"
+                ]
+                new_result = replace(result, classification="review-required", threshold_reasons=reasons)
+        updated.append(new_result)
+    validation.long_term_results = updated
+    validation.material_needs_review = material_needs_review(validation.needs_review)
+    validation.lockable = compute_lockable(validation.passed, validation.needs_review, validation.sign_off)
 
 
 def evaluate_acceptance(
@@ -50,6 +93,10 @@ def evaluate_acceptance(
     behavior_stress_results: list[BehaviorStressResult] | None = None,
     cross_border_stress_results: list[CrossBorderStressResult] | None = None,
     product_risk: ProductRiskSummary | None = None,
+    qdii_metrics: QdiiExecutionMetrics | None = None,
+    rebalance_metrics: RebalanceExecutionMetrics | None = None,
+    sequence_risk: dict[str, Any] | None = None,
+    sign_off: HumanSignOff | None = None,
 ) -> ValidationResult:
     failures: list[str] = []
     needs_review: list[str] = []
@@ -61,12 +108,12 @@ def evaluate_acceptance(
         failures.append(f"Criterion 2: worst year {metrics.worst_year_return:.1%} < -20%")
 
     if metrics.max_drawdown_recovery_days is None:
+        # Always material for lockable; deep unrecovered remains hard fail.
+        needs_review.append(
+            "Criterion 3: maximum drawdown not fully recovered by window end (unrecovered)"
+        )
         if metrics.max_drawdown <= SHALLOW_UNRECOVERED_MDD:
             failures.append("Criterion 3: maximum drawdown never recovered within the test window")
-        else:
-            needs_review.append(
-                "Criterion 3: maximum drawdown not fully recovered by window end (shallow)"
-            )
     elif metrics.max_drawdown_recovery_days > MAX_NAV_RECOVERY_DAYS:
         failures.append(
             f"Criterion 3: maximum drawdown recovery took {metrics.max_drawdown_recovery_days} trading days, exceeding {MAX_NAV_RECOVERY_DAYS}"
@@ -108,6 +155,18 @@ def evaluate_acceptance(
             failures.append("Criterion 3: product-level risk failed")
         elif product_risk.worst_classification == "review-required" or product_risk.weighted_score >= 40:
             needs_review.append("Criterion 3: product-level risk requires review")
+
+    if qdii_metrics is not None:
+        max_dev = rebalance_metrics.max_post_rebalance_deviation if rebalance_metrics is not None else None
+        needs_review.extend(
+            qdii_quality_reviews(
+                pending_cash_days=qdii_metrics.pending_cash_days,
+                qdii_friction_months=qdii_metrics.qdii_friction_months,
+                avg_qdii_weight_gap=qdii_metrics.avg_qdii_weight_gap,
+                max_post_rebalance_deviation=max_dev,
+                rebalance_threshold=config.rebalance_threshold,
+            )
+        )
 
     cash_bench = benchmarks["cash"]
     if metrics.annualized_return < cash_bench.annualized_return + 0.02:
@@ -152,7 +211,19 @@ def evaluate_acceptance(
         "real_return": "thesis-broken" if metrics.worst_rolling_5y_real_return < -0.10 else ("review-required" if metrics.worst_rolling_3y_real_return < 0 else "normal"),
     }
 
-    profile_results = classify_suitability(config, metrics, qdii_fill_rate=1.0, avg_qdii_weight_gap=0.0, sequence_risk={})
+    fill = qdii_metrics.qdii_fill_rate if qdii_metrics is not None else 1.0
+    gap = qdii_metrics.avg_qdii_weight_gap if qdii_metrics is not None else 0.0
+    friction_months = qdii_metrics.qdii_friction_months if qdii_metrics is not None else 0
+    recovery_months = qdii_metrics.qdii_recovery_months if qdii_metrics is not None else 0
+    profile_results = classify_suitability(
+        config,
+        metrics,
+        qdii_fill_rate=fill,
+        avg_qdii_weight_gap=gap,
+        qdii_friction_months=friction_months,
+        qdii_recovery_months=recovery_months,
+        sequence_risk=sequence_risk or {},
+    )
     if robustness is not None and robustness.summary.worst_case is not None and robustness.summary.verdict in {"sensitive", "fragile", "thesis-broken"}:
         failures.append(f"Criterion 6: robustness verdict {robustness.summary.verdict}")
     profile_payload: dict[str, dict[str, list[str] | str]] = {}
@@ -165,9 +236,11 @@ def evaluate_acceptance(
             "governance_notes": suit.governance_notes,
         }
 
+    passed = len(failures) == 0
+    material = material_needs_review(needs_review)
     result = ValidationResult(
         config.config_id,
-        len(failures) == 0,
+        passed,
         failures,
         metrics,
         comp,
@@ -178,6 +251,9 @@ def evaluate_acceptance(
         profile_payload,
         robustness,
         needs_review=needs_review,
+        lockable=compute_lockable(passed, needs_review, sign_off),
+        sign_off=sign_off,
+        material_needs_review=material,
     )
     result.path_stress_results = path_stress_results
     result.behavior_stress_results = behavior_stress_results

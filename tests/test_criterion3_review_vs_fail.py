@@ -143,6 +143,8 @@ def test_acceptance_passes_with_review_required_only():
     assert any("CB1" in item for item in validation.needs_review)
     assert any("prolonged liquidity" in item for item in validation.needs_review)
     assert all("requires review" not in r for r in validation.failure_reasons)
+    assert validation.lockable is False
+    assert any("CB1" in item for item in validation.material_needs_review)
 
 
 def test_acceptance_fails_on_thesis_broken():

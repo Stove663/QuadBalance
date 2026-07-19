@@ -9,8 +9,15 @@ import pandas as pd
 from quadbalance.asset_universe import BASE_CAPITAL, CASH_SYMBOL, MONTHLY_CONTRIBUTION, QDII_SYMBOL, Quadrant
 from quadbalance.config import StrategyConfig
 from quadbalance.execution_friction import ExecutionFrictionProfile, FrictionWindow, validate_friction_profile, window_for_date
-from quadbalance.fees import purchase_fee_rate, redemption_fee_rate
+from quadbalance.fees import purchase_fee_rate, redemption_fee_rate, short_hold_redemption_rate
 from quadbalance.instrument_pool import primary_qdii_handoff_date, qdii_pool_for_date
+
+
+@dataclass
+class ShareLot:
+    purchase_date: pd.Timestamp
+    shares: float
+    settled: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,9 @@ class _SimContext:
     qdii_friction_streak: int = 0
     qdii_recovery_streak: int = 0
     events: list[SimulationEvent] = field(default_factory=list)
+    lots: dict[str, list[ShareLot]] = field(default_factory=dict)
+    unsettled_cash: float = 0.0
+    pending_settle_shares: dict[str, float] = field(default_factory=dict)
 
 
 def _first_trading_days_per_month(index: pd.DatetimeIndex) -> set[pd.Timestamp]:
@@ -146,6 +156,22 @@ def _first_trading_days_per_year(index: pd.DatetimeIndex) -> set[pd.Timestamp]:
     return set(df.groupby("year").apply(lambda g: g.index[0], include_groups=False))
 
 
+def _settle_prior_day(shares: dict[str, float], ctx: _SimContext, day_prices: pd.Series) -> None:
+    """Settle T+1 buys into sellable shares and sale proceeds into cash."""
+    for sym, qty in list(ctx.pending_settle_shares.items()):
+        if qty <= 0:
+            continue
+        shares[sym] = shares.get(sym, 0.0) + qty
+        for lot in ctx.lots.get(sym, []):
+            if not lot.settled:
+                lot.settled = True
+    ctx.pending_settle_shares.clear()
+    if ctx.unsettled_cash > 0:
+        cash_amt = ctx.unsettled_cash
+        ctx.unsettled_cash = 0.0
+        _park_in_cash(shares, cash_amt, day_prices, settle_immediate=True, ctx=ctx, dt=None)
+
+
 def _buy(
     shares: dict[str, float],
     symbol: str,
@@ -154,12 +180,22 @@ def _buy(
     premium: float = 0.0,
     transaction_cost_multiplier: float = 1.0,
     spread_bps: float = 0.0,
+    *,
+    ctx: _SimContext | None = None,
+    dt: pd.Timestamp | None = None,
+    settle_immediate: bool = False,
 ) -> float:
     if amount <= 0 or price <= 0:
         return amount
     effective_price = price * (1 + premium) * (1 + purchase_fee_rate(symbol) * transaction_cost_multiplier) * (1 + spread_bps / 10000.0)
     buy_shares = amount / effective_price
-    shares[symbol] = shares.get(symbol, 0.0) + buy_shares
+    if settle_immediate or ctx is None or dt is None:
+        shares[symbol] = shares.get(symbol, 0.0) + buy_shares
+        if ctx is not None and dt is not None:
+            ctx.lots.setdefault(symbol, []).append(ShareLot(dt, buy_shares, settled=True))
+    else:
+        ctx.pending_settle_shares[symbol] = ctx.pending_settle_shares.get(symbol, 0.0) + buy_shares
+        ctx.lots.setdefault(symbol, []).append(ShareLot(dt, buy_shares, settled=False))
     return 0.0
 
 
@@ -171,17 +207,54 @@ def _sell(
     transaction_cost_multiplier: float = 1.0,
     spread_bps: float = 0.0,
     premium_shock_bps: float = 0.0,
+    *,
+    ctx: _SimContext | None = None,
+    dt: pd.Timestamp | None = None,
 ) -> float:
     if amount <= 0 or price <= 0:
         return 0.0
+    available = shares.get(symbol, 0.0)
+    if available <= 0:
+        return amount
+
+    if ctx is not None and dt is not None and ctx.lots.get(symbol):
+        remaining_amount = amount
+        raised = 0.0
+        lots = ctx.lots[symbol]
+        while remaining_amount > 1e-9 and lots and available > 1e-9:
+            lot = lots[0]
+            if not lot.settled or lot.shares <= 0:
+                lots.pop(0)
+                continue
+            holding_days = int((dt.normalize() - lot.purchase_date.normalize()).days)
+            fee = short_hold_redemption_rate(symbol, holding_days) * transaction_cost_multiplier
+            effective_price = price * (1 - fee) * (1 - spread_bps / 10000.0) * (1 - premium_shock_bps / 10000.0)
+            if effective_price <= 0:
+                break
+            needed = remaining_amount / effective_price
+            take = min(lot.shares, available, needed)
+            proceeds = take * effective_price
+            lot.shares -= take
+            available -= take
+            shares[symbol] = available
+            raised += proceeds
+            remaining_amount -= proceeds
+            if lot.shares <= 1e-12:
+                lots.pop(0)
+        ctx.unsettled_cash += raised
+        return max(0.0, amount - raised)
+
     effective_price = price * (1 - redemption_fee_rate(symbol) * transaction_cost_multiplier) * (1 - spread_bps / 10000.0) * (1 - premium_shock_bps / 10000.0)
     needed_shares = amount / effective_price
-    available = shares.get(symbol, 0.0)
     if needed_shares <= available:
         shares[symbol] = available - needed_shares
+        if ctx is not None:
+            ctx.unsettled_cash += amount
         return 0.0
     proceeds = available * effective_price
     shares[symbol] = 0.0
+    if ctx is not None:
+        ctx.unsettled_cash += proceeds
     return amount - proceeds
 
 
@@ -218,14 +291,42 @@ def _qdii_holdings_value(shares: dict[str, float], day_prices: pd.Series, dt: pd
     return sum(shares.get(s, 0.0) * day_prices[s] for s in _qdii_symbols_for_date(dt, day_prices))
 
 
-def _portfolio_value(shares: dict[str, float], day_prices: pd.Series, pending_cash: float = 0.0) -> float:
+def _portfolio_value(
+    shares: dict[str, float],
+    day_prices: pd.Series,
+    pending_cash: float = 0.0,
+    ctx: _SimContext | None = None,
+) -> float:
     holdings = sum(shares.get(s, 0.0) * day_prices[s] for s in day_prices.index if s in shares)
-    return holdings + pending_cash
+    pending_shares_value = 0.0
+    unsettled = 0.0
+    if ctx is not None:
+        unsettled = ctx.unsettled_cash
+        for sym, qty in ctx.pending_settle_shares.items():
+            if sym in day_prices.index and qty > 0:
+                pending_shares_value += qty * float(day_prices[sym])
+    return holdings + pending_cash + pending_shares_value + unsettled
 
 
-def _park_in_cash(shares: dict[str, float], amount: float, day_prices: pd.Series) -> None:
+def _park_in_cash(
+    shares: dict[str, float],
+    amount: float,
+    day_prices: pd.Series,
+    *,
+    settle_immediate: bool = False,
+    ctx: _SimContext | None = None,
+    dt: pd.Timestamp | None = None,
+) -> None:
     if amount > 0 and CASH_SYMBOL in day_prices.index:
-        _buy(shares, CASH_SYMBOL, amount, day_prices[CASH_SYMBOL])
+        _buy(
+            shares,
+            CASH_SYMBOL,
+            amount,
+            day_prices[CASH_SYMBOL],
+            ctx=ctx,
+            dt=dt,
+            settle_immediate=settle_immediate or ctx is None,
+        )
 
 
 def _cash_holding_value(shares: dict[str, float], day_prices: pd.Series) -> float:
@@ -264,7 +365,7 @@ def _buy_qdii_with_quota(shares: dict[str, float], amount: float, day_prices: pd
     if not config.enable_qdii_quota or _is_proxy_era(dt):
         if QDII_SYMBOL in day_prices.index:
             exec_amount = amount
-            _buy(shares, QDII_SYMBOL, exec_amount, day_prices[QDII_SYMBOL], config.qdii_premium)
+            _buy(shares, QDII_SYMBOL, exec_amount, day_prices[QDII_SYMBOL], config.qdii_premium, ctx=ctx, dt=dt)
             ctx.qdii_executed += exec_amount
             return 0.0
         return amount
@@ -279,7 +380,7 @@ def _buy_qdii_with_quota(shares: dict[str, float], amount: float, day_prices: pd
             continue
         buy_amt = min(remainder, cap_left)
         premium = config.qdii_premium if sym == QDII_SYMBOL else 0.0
-        _buy(shares, sym, buy_amt, day_prices[sym], premium)
+        _buy(shares, sym, buy_amt, day_prices[sym], premium, ctx=ctx, dt=dt)
         ctx.quota_used[sym] = ctx.quota_used.get(sym, 0.0) + buy_amt
         ctx.qdii_executed += buy_amt
         remainder -= buy_amt
@@ -295,11 +396,11 @@ def _process_qdii_backlog(shares: dict[str, float], day_prices: pd.Series, confi
     attempt = min(ctx.qdii_backlog, cash_avail)
     if attempt <= 0:
         return
-    _sell(shares, CASH_SYMBOL, attempt, day_prices[CASH_SYMBOL])
+    _sell(shares, CASH_SYMBOL, attempt, day_prices[CASH_SYMBOL], ctx=ctx, dt=dt)
     unfilled = _buy_qdii_with_quota(shares, attempt, day_prices, config, ctx, dt, count_intended=False)
     ctx.qdii_backlog = unfilled
     if unfilled > 0:
-        _park_in_cash(shares, unfilled, day_prices)
+        _park_in_cash(shares, unfilled, day_prices, ctx=ctx, dt=dt, settle_immediate=True)
 
 
 def _handle_qdii_unfilled(
@@ -312,7 +413,7 @@ def _handle_qdii_unfilled(
     if unfilled <= 0:
         return
     ctx.qdii_backlog += unfilled
-    _park_in_cash(shares, unfilled, day_prices)
+    _park_in_cash(shares, unfilled, day_prices, ctx=ctx, dt=dt, settle_immediate=True)
     if dt is not None:
         ctx.events.append(
             SimulationEvent(
@@ -331,7 +432,7 @@ def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_pr
         unfilled = _buy_qdii_with_quota(shares, amount, day_prices, config, ctx, dt)
         _handle_qdii_unfilled(shares, unfilled, day_prices, ctx, dt)
         return
-    _buy(shares, symbol, amount, day_prices[symbol], config.qdii_premium if symbol == QDII_SYMBOL else 0.0)
+    _buy(shares, symbol, amount, day_prices[symbol], config.qdii_premium if symbol == QDII_SYMBOL else 0.0, ctx=ctx, dt=dt)
     ctx.events.append(
         SimulationEvent(
             date=dt.strftime("%Y-%m-%d"),
@@ -342,7 +443,7 @@ def _buy_instrument(shares: dict[str, float], symbol: str, amount: float, day_pr
     )
 
 
-def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, dt: pd.Timestamp, friction: ExecutionFrictionProfile | None = None) -> tuple[float, list[RebalanceShortfallEvent]]:
+def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, dt: pd.Timestamp, friction: ExecutionFrictionProfile | None = None, ctx: _SimContext | None = None) -> tuple[float, list[RebalanceShortfallEvent]]:
     pool = _qdii_symbols_for_date(dt, day_prices)
     total = _qdii_holdings_value(shares, day_prices, dt)
     if total <= 0 or amount <= 0:
@@ -354,7 +455,7 @@ def _sell_qdii_pro_rata(shares: dict[str, float], amount: float, day_prices: pd.
         if holding <= 0:
             continue
         portion = amount * (holding / total)
-        shortfall = _sell(shares, sym, portion, day_prices[sym])
+        shortfall = _sell(shares, sym, portion, day_prices[sym], ctx=ctx, dt=dt)
         raised = portion - shortfall
         total_raised += raised
         if shortfall > 0:
@@ -379,7 +480,7 @@ def _proportional_contribution(shares: dict[str, float], amount: float, day_pric
 
 
 def _underweight_contribution(shares: dict[str, float], amount: float, day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp) -> None:
-    total = _portfolio_value(shares, day_prices)
+    total = _portfolio_value(shares, day_prices, ctx=ctx)
     if total <= 0:
         _proportional_contribution(shares, amount, day_prices, config, ctx, dt)
         return
@@ -390,8 +491,8 @@ def _underweight_contribution(shares: dict[str, float], amount: float, day_price
     _allocate_to_quadrant(shares, worst, amount, day_prices, config, ctx, dt)
 
 
-def _max_quadrant_deviation(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, pending_cash: float = 0.0) -> float:
-    total = _portfolio_value(shares, day_prices, pending_cash)
+def _max_quadrant_deviation(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, pending_cash: float = 0.0, ctx: _SimContext | None = None) -> float:
+    total = _portfolio_value(shares, day_prices, pending_cash, ctx=ctx)
     if total <= 0:
         return 0.0
     q_vals = _quadrant_values(shares, day_prices, config)
@@ -400,11 +501,12 @@ def _max_quadrant_deviation(shares: dict[str, float], day_prices: pd.Series, con
 
 
 def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: StrategyConfig, ctx: _SimContext, dt: pd.Timestamp, extra_cash: float = 0.0, friction: ExecutionFrictionProfile | None = None) -> None:
-    total = _portfolio_value(shares, day_prices) + extra_cash
+    total = _portfolio_value(shares, day_prices, ctx=ctx) + extra_cash
     if total <= 0:
         return
     target_weights = config.instrument_weights()
     qdii_target = config.qdii_target_weight()
+    # T+1: sale proceeds settle next day; only extra_cash (e.g. contribution) funds same-day buys.
     rebalance_cash = extra_cash
 
     for sym, target_w in target_weights.items():
@@ -414,21 +516,19 @@ def _rebalance(shares: dict[str, float], day_prices: pd.Series, config: Strategy
         target_val = total * target_w
         if current > target_val:
             sell_amt = current - target_val
-            shortfall = _sell(shares, sym, sell_amt, day_prices[sym])
+            shortfall = _sell(shares, sym, sell_amt, day_prices[sym], ctx=ctx, dt=dt)
             raised = sell_amt - shortfall
-            rebalance_cash += raised
             if shortfall > 0:
                 ctx.rebalance_shortfalls.append(RebalanceShortfallEvent(dt.strftime("%Y-%m-%d"), sym, sell_amt, raised, shortfall))
 
-    total = _portfolio_value(shares, day_prices) + rebalance_cash
+    total = _portfolio_value(shares, day_prices, ctx=ctx) + rebalance_cash
     current_qdii = _qdii_holdings_value(shares, day_prices, dt)
     target_qdii = total * qdii_target
     if current_qdii > target_qdii:
-        raised, events = _sell_qdii_pro_rata(shares, current_qdii - target_qdii, day_prices, config, dt)
-        rebalance_cash += raised
+        raised, events = _sell_qdii_pro_rata(shares, current_qdii - target_qdii, day_prices, config, dt, ctx=ctx)
         ctx.rebalance_shortfalls.extend(events)
 
-    total = _portfolio_value(shares, day_prices) + rebalance_cash
+    total = _portfolio_value(shares, day_prices, ctx=ctx) + rebalance_cash
     buy_needs: list[tuple[str, float]] = []
     for sym, target_w in target_weights.items():
         if sym not in day_prices.index or config.is_qdii_symbol(sym):
@@ -549,6 +649,7 @@ def simulate(
         day_prices = _merge_day_prices(core_row, backup_prices, dt)
         _maybe_reset_quota(ctx, dt)
         if i > 0:
+            _settle_prior_day(shares, ctx, day_prices)
             _process_qdii_backlog(shares, day_prices, config, ctx, dt)
         if i == 0:
             ctx.events.append(
@@ -565,7 +666,7 @@ def simulate(
             contrib_paused = bool(pause_contribution_months and month_period in pause_contribution_months)
             rebalance_triggered = False
             if enable_rebalance and dt in year_starts:
-                total = _portfolio_value(shares, day_prices)
+                total = _portfolio_value(shares, day_prices, ctx=ctx)
                 q_vals = _quadrant_values(shares, day_prices, config)
                 targets = config.quadrant_weights
                 rebalance_triggered = total > 0 and any(
@@ -610,7 +711,7 @@ def simulate(
         _record_weight_gap(shares, day_prices, config, ctx, dt)
         ctx.backlog_history.append(ctx.qdii_backlog)
         # Backlog is earmarked cash already held in CASH_SYMBOL via _park_in_cash.
-        values.append(_portfolio_value(shares, day_prices))
+        values.append(_portfolio_value(shares, day_prices, ctx=ctx))
         pending_series.append(ctx.qdii_backlog)
         dates.append(dt)
 

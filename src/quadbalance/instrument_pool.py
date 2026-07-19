@@ -47,18 +47,18 @@ class FundInstrument:
         return self.role == "primary"
 
 
-# v1 backtest fee rates (1-discount platform assumptions; redemption 0% long-hold)
-_FEE_STOCK_A = TradeFees(0.0012)
-_FEE_STOCK_C = TradeFees(0.0)
-_FEE_QDII_A = TradeFees(0.0012)
-_FEE_QDII_BACKUP_A = TradeFees(0.0010)
-_FEE_QDII_C = TradeFees(0.0)
-_FEE_BOND_B1 = TradeFees(0.0006)
-_FEE_BOND_B2 = TradeFees(0.0008)
-_FEE_GOLD_A = TradeFees(0.0006)
-_FEE_GOLD_C = TradeFees(0.0)
-_FEE_CASH = TradeFees(0.0)
-_FEE_CASH_PROXY = TradeFees(0.0004)
+# Short-hold redemption (applied when FIFO lot age < SHORT_HOLD_DAYS)
+_FEE_STOCK_A = TradeFees(0.0012, redemption_rate=0.005)
+_FEE_STOCK_C = TradeFees(0.0, redemption_rate=0.005)
+_FEE_QDII_A = TradeFees(0.0012, redemption_rate=0.005)
+_FEE_QDII_BACKUP_A = TradeFees(0.0010, redemption_rate=0.005)
+_FEE_QDII_C = TradeFees(0.0, redemption_rate=0.005)
+_FEE_BOND_B1 = TradeFees(0.0006, redemption_rate=0.001)
+_FEE_BOND_B2 = TradeFees(0.0008, redemption_rate=0.001)
+_FEE_GOLD_A = TradeFees(0.0006, redemption_rate=0.005)
+_FEE_GOLD_C = TradeFees(0.0, redemption_rate=0.005)
+_FEE_CASH = TradeFees(0.0, redemption_rate=0.0)
+_FEE_CASH_PROXY = TradeFees(0.0004, redemption_rate=0.0)
 
 
 # --- Stocks: domestic (60% of stocks quadrant) ---

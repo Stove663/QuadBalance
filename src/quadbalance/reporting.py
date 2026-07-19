@@ -13,6 +13,7 @@ from quadbalance.fees import format_fee_assumptions_markdown
 from quadbalance.instrument_pool import format_pool_markdown, format_qdii_era_markdown
 from quadbalance.profile_thresholds import InvestorProfile, DEFAULT_INVESTOR_PROFILES, overridden_fields
 from quadbalance.proxy_sensitivity import SensitivitySummary, format_sensitivity_summary_markdown
+from quadbalance.lock_integrity import format_sign_off_markdown
 from quadbalance.reporting_sections import (
     format_behavior_stress_markdown,
     format_boundary_summary,
@@ -53,6 +54,8 @@ def generate_lock_document(
     s4_path: S4PathResult | None = None,
     investor_profiles: tuple[InvestorProfile, ...] = DEFAULT_INVESTOR_PROFILES,
     intended_profile: str | None = None,
+    lock_status: str = "locked",
+    inflation_annual: float = 0.03,
 ) -> None:
     m = validation.metrics
     stock_weights = config.stock_weights
@@ -63,7 +66,8 @@ def generate_lock_document(
         format_risk_overview_panel(validation),
         format_risk_summary_page(validation),
         f"**Configuration ID:** {config.config_id}",
-        f"**Status:** locked",
+        f"**Status:** {lock_status}",
+        f"**Lockable:** {'yes' if getattr(validation, 'lockable', False) else 'no'}",
         "",
         f"**Asset channel:** 场外基金 (off-exchange)",
         "",
@@ -98,6 +102,12 @@ def generate_lock_document(
         f"- Start: {sim_result.effective_start}",
         f"- End: {sim_result.effective_end}",
         "",
+        "## Assumptions",
+        "",
+        f"- Historical real-return CPI assumption: {inflation_annual:.1%} annual (constant)",
+        "- Long-term regime stresses may use different CPI paths than this historical assumption",
+        "- OTC trades settle T+1 (buys not sellable same day; sale proceeds not redeployable same day)",
+        "",
         "## Core Metrics",
         "",
         f"| Metric | Value |",
@@ -117,8 +127,10 @@ def generate_lock_document(
         f"| Pain index | {m.pain_index:.2%} |",
         f"| CDaR 95 | {m.cdar_95:.2%} |",
         f"| Drawdown events ≤ -10% / -15% / -20% | {m.drawdown_10pct_events} / {m.drawdown_15pct_events} / {m.drawdown_20pct_events} |",
+        f"| CPI assumption (historical real metrics) | {inflation_annual:.1%} |",
         "",
         format_fee_assumptions_markdown(),
+        format_sign_off_markdown(getattr(validation, "sign_off", None)),
     ]
     if sim_result.qdii_metrics is not None:
         qm = sim_result.qdii_metrics

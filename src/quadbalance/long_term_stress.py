@@ -470,6 +470,9 @@ def run_long_term_scenario(prices: pd.DataFrame, config: StrategyConfig, scenari
         sequence_risk_results.append({"scenario_id": sid, "classification": seq_class, "reasons": [f"coverage {result.withdrawal_coverage_ratio:.1%}", f"forced sale {result.forced_sale_amount:,.0f}"]})
         if seq_class != "normal":
             reasons.append(f"{sid}: {result.withdrawal_coverage_ratio:.1%} coverage, forced sale {result.forced_sale_amount:,.0f}")
+        if sid == "seq_inflation" and seq_class == "thesis-broken" and classification == "normal":
+            classification = "review-required"
+            reasons.append("seq_inflation: thesis-broken escalates scenario to review-required")
     if withdrawal_4pct.depleted:
         reasons.append("4% withdrawal depletes under long-term regime")
     return LongTermScenarioResult(

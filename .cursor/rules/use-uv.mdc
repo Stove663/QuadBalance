@@ -1,0 +1,25 @@
+---
+description: Always use uv (never python3/python/pip) for Python commands in this project
+alwaysApply: true
+---
+
+# Use uv, not python3
+
+This project is managed by **uv** (`uv.lock` + `pyproject.toml`). System `python3` / `python` / `pip` are **not** the project environment — do not call them.
+
+## Default commands
+
+| Instead of | Use |
+|---|---|
+| `python3 …` / `python …` | `uv run …` |
+| `python3 -m pytest …` | `uv run pytest …` |
+| `python3 -c "…"` | `uv run python -c "…"` |
+| `pip install …` | `uv add …` |
+| `python3 -m venv …` | `uv sync` / `uv run …` |
+
+## Hard rules
+
+- Never invoke `python3`, `python`, or `pip` directly in the shell.
+- Prefer `uv run <tool>` (pytest, ruff, the package CLI, etc.).
+- Need a Python REPL one-liner → `uv run python -c "…"`.
+- Need a specific interpreter version → `uv run -p 3.12 …`, not `python3.12`.

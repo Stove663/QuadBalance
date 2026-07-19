@@ -309,13 +309,22 @@ def load_market_data(
 MAX_NAV_STALE_DAYS = 5
 
 
+def _assert_no_backup_alignment(symbols: list[str]) -> None:
+    forbidden = set(symbols) & set(QDII_BACKUP_SYMBOLS)
+    if forbidden:
+        raise ValueError(
+            f"Alignment price matrix must not include QDII backups: {sorted(forbidden)}"
+        )
+
+
 def load_price_matrix_with_meta(
     symbols: list[str] | None = None,
     start: str = PRIMARY_START,
     use_cache: bool = True,
 ) -> tuple[pd.DataFrame, PriceMatrixMeta]:
     """Load aligned prices and record any backtest proxy stitching."""
-    symbols = symbols or PRICE_MATRIX_SYMBOLS
+    symbols = list(symbols or PRICE_MATRIX_SYMBOLS)
+    _assert_no_backup_alignment(symbols)
     series_map: dict[str, pd.Series] = {}
     proxy_usage: list[BacktestProxyUsage] = []
     start_ts = pd.Timestamp(start)
@@ -334,6 +343,7 @@ def load_price_matrix_with_meta(
         return raw, PriceMatrixMeta(proxy_usage=tuple(proxy_usage))
     calendar = pd.bdate_range(raw.index.min(), raw.index.max())
     prices = raw.reindex(calendar).ffill(limit=MAX_NAV_STALE_DAYS).dropna(how="any")
+    _assert_no_backup_alignment(list(prices.columns))
     return prices, PriceMatrixMeta(proxy_usage=tuple(proxy_usage))
 
 

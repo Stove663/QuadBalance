@@ -38,7 +38,22 @@ def main() -> None:
         default=None,
         help="JSON file with per-profile threshold overrides merged onto built-in defaults",
     )
+    parser.add_argument(
+        "--sign-off-reviewer",
+        type=str,
+        default=None,
+        help="If no naturally lockable config, lock best soft-pass candidate with this reviewer sign-off",
+    )
+    parser.add_argument(
+        "--sign-off-rationale",
+        type=str,
+        default=None,
+        help="Rationale required with --sign-off-reviewer acknowledging material needs_review items",
+    )
     args = parser.parse_args()
+
+    if bool(args.sign_off_reviewer) != bool(args.sign_off_rationale):
+        parser.error("--sign-off-reviewer and --sign-off-rationale must be supplied together")
 
     print("Loading data and running parameter sweep...")
     df, validation, config = run_sweep(
@@ -47,6 +62,8 @@ def main() -> None:
         full_sensitivity=args.full_sensitivity,
         intended_profile=args.intended_profile,
         profile_thresholds_path=args.profile_thresholds,
+        sign_off_reviewer=args.sign_off_reviewer,
+        sign_off_rationale=args.sign_off_rationale,
     )
 
     passed = df["validation_passed"].sum()

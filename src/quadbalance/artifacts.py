@@ -163,6 +163,16 @@ def write_run_artifacts(
     metrics_payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "config_id": config.config_id,
+        "validation_passed": validation.passed,
+        "lockable": getattr(validation, "lockable", False),
+        "needs_review": list(getattr(validation, "needs_review", None) or []),
+        "material_needs_review": list(getattr(validation, "material_needs_review", None) or []),
+        "sign_off": (
+            validation.sign_off.to_dict()
+            if getattr(validation, "sign_off", None) is not None
+            else None
+        ),
+        "cpi_assumption_annual": 0.03,
         "annualized_return": m.annualized_return,
         "annualized_volatility": m.annualized_volatility,
         "max_drawdown": m.max_drawdown,

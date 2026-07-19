@@ -10,6 +10,8 @@ from quadbalance.config import (
 )
 from quadbalance.instrument_pool import ALL_INSTRUMENTS, TradeFees
 
+SHORT_HOLD_DAYS = 7
+
 # Symbols that may appear in simulation (primaries + QDII backups)
 SIMULATION_SYMBOLS: frozenset[str] = frozenset(
     {
@@ -30,8 +32,15 @@ def purchase_fee_rate(symbol: str) -> float:
 
 
 def redemption_fee_rate(symbol: str) -> float:
-    """Return redemption fee rate (decimal) for symbol. v1: always 0% for long-hold."""
+    """Return short-hold redemption fee rate (decimal) for symbol."""
     return _trade_fees(symbol).redemption_rate
+
+
+def short_hold_redemption_rate(symbol: str, holding_days: int) -> float:
+    """Apply short-hold redemption only when lot age is below the window."""
+    if holding_days < SHORT_HOLD_DAYS:
+        return redemption_fee_rate(symbol)
+    return 0.0
 
 
 def _trade_fees(symbol: str) -> TradeFees:
@@ -57,12 +66,13 @@ def format_fee_assumptions_markdown() -> str:
     lines = [
         "## Transaction Fee Assumptions",
         "",
-        "v1 simulation uses static per-symbol purchase fees (1-discount platform rates). "
-        "Redemption fees are modeled as 0% (assumes holdings exceed short-term penalty windows "
-        "at annual rebalance). Management fees are embedded in NAV.",
+        "Simulation uses static per-symbol purchase fees (1-discount platform rates). "
+        f"Short-hold redemption applies when a sold FIFO lot is younger than {SHORT_HOLD_DAYS} days "
+        "(equity/QDII/gold typically 0.50%, bonds 0.10%, money-market cash 0%). "
+        "Seasoned lots incur 0% short-hold redemption. Management fees are embedded in NAV.",
         "",
-        "| Code | Name | Purchase | Redemption (v1) |",
-        "|------|------|----------|-----------------|",
+        "| Code | Name | Purchase | Short-hold Redemption |",
+        "|------|------|----------|------------------------|",
     ]
     for code, name, purchase, redemption in primary_fee_rows():
         lines.append(

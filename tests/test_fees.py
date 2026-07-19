@@ -18,7 +18,7 @@ def test_simulation_symbols_have_fees():
     for symbol in SIMULATION_SYMBOLS:
         assert symbol in ALL_INSTRUMENTS
         assert purchase_fee_rate(symbol) >= 0.0
-        assert redemption_fee_rate(symbol) == 0.0
+        assert redemption_fee_rate(symbol) >= 0.0
 
 
 def test_purchase_fee_rates():
@@ -57,4 +57,10 @@ def test_fee_assumptions_markdown_includes_primaries():
     assert "Transaction Fee Assumptions" in md
     assert "110020" in md
     assert "006874" in md
-    assert "0%" in md
+    assert "Short-hold" in md
+
+
+def test_equity_has_nonzero_short_hold_redemption():
+    assert redemption_fee_rate("110020") == pytest.approx(0.005)
+    assert redemption_fee_rate("000216") == pytest.approx(0.005)
+    assert redemption_fee_rate("006874") == pytest.approx(0.0)

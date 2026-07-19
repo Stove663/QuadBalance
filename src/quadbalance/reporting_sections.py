@@ -25,12 +25,21 @@ RISK_MAP_ORDER = [
 
 
 LOCK_SELECTION_KEYS = [
+    "lockable over soft-pass (material needs_review without sign-off excluded)",
     "suitability rank for intended profile (suitable > caution > unsuitable) when supplied",
+    "stocks sub-split risk-budget preference (60-40 over 40-60 when return edge < 50bp or extra CB reviews)",
     "higher annualized return",
     "lower absolute maximum drawdown",
     "higher QDII fill rate",
     "lexicographic configuration ID ascending",
 ]
+
+# Stress IDs evaluated via closed-form / formula shocks (not full simulate paths).
+FORMULA_STRESS_IDS = frozenset({
+    "S1", "S2", "S3", "S6", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15",
+    "S16", "S17", "S18", "S19", "S20", "S21", "S22", "S23", "S24", "S25", "S26", "S27",
+})
+PATH_STRESS_IDS = frozenset({"S4", "S5", "S7"})
 
 
 def format_rebalance_execution_markdown(sim_result: SimulationResult) -> str:
@@ -115,23 +124,99 @@ def format_profile_suitability_summary(validation: ValidationResult) -> str:
     return "\n".join(lines)
 
 
+def _layer_statuses(validation: ValidationResult) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Shared severity used by Risk Overview and Risk Map."""
+    metrics = validation.metrics
+    stress = validation.stress_results
+    path = getattr(validation, "path_stress_results", []) or []
+    behavior = getattr(validation, "behavior_stress_results", []) or []
+    cross_border = getattr(validation, "cross_border_stress_results", []) or []
+    product = getattr(validation, "product_risk", None)
+
+    def status(signals: list[str]) -> str:
+        if not signals:
+            return "green"
+        if any("critical" in s or "failed" in s or "breach" in s or "frozen" in s for s in signals):
+            return "red"
+        return "yellow"
+
+    market_signals: list[str] = []
+    if metrics.max_drawdown <= -0.20:
+        market_signals.append("critical: max drawdown exceeds 20%")
+    if metrics.drawdown_20pct_events > 0:
+        market_signals.append("multiple 20% drawdown episodes")
+    if any(sr.scenario_id in {"S13", "S14", "S19"} and sr.classification != "normal" for sr in stress):
+        market_signals.append("defensive sleeves lose hedge value")
+
+    macro_signals: list[str] = []
+    if metrics.worst_rolling_5y_real_return < 0:
+        macro_signals.append("critical: negative 5-year real return")
+    if metrics.pain_index > 0.05:
+        macro_signals.append("persistent drawdown pain")
+    if any(sr.scenario_id in {"S8", "S9", "S11", "S12", "S17"} and sr.classification != "normal" for sr in stress):
+        macro_signals.append("inflation / stagnation / purchasing power stress")
+
+    path_signals: list[str] = []
+    if any(r.classification != "normal" for r in path):
+        path_signals.append("rebalancing or cash conversion is blocked under stress")
+    if metrics.max_drawdown_recovery_days is None or metrics.max_drawdown_recovery_days > 252:
+        path_signals.append("long recovery time")
+
+    behavior_signals: list[str] = []
+    stress_fed = [r for r in behavior if getattr(r, "evaluation_mode", "historical") == "stress-fed"]
+    hist = [r for r in behavior if getattr(r, "evaluation_mode", "historical") == "historical"]
+    if any(r.triggered for r in behavior):
+        behavior_signals.append("behavioral rules trigger in deep drawdown")
+    if stress_fed and not any(r.triggered for r in hist) and any(r.triggered for r in stress_fed):
+        behavior_signals.append("stress-fed behavior rules trigger despite shallow historical MDD")
+    if metrics.longest_underwater_days > 252 * 2:
+        behavior_signals.append("long underwater periods may challenge discipline")
+    if any(getattr(r, "classification", "normal") != "normal" for r in stress_fed):
+        if not behavior_signals:
+            behavior_signals.append("stress-fed behavior evaluation requires review")
+
+    cross_border_signals: list[str] = []
+    if any(r.classification != "normal" for r in cross_border):
+        cross_border_signals.append("critical: cross-border access or settlement constraints reduce usable value")
+    if any(getattr(r, "frozen_asset_weight", 0) > 0 for r in cross_border):
+        cross_border_signals.append("frozen external-linked weight is non-zero")
+
+    product_signals: list[str] = []
+    if product is not None:
+        product_signals.append(f"weighted product risk score {product.weighted_score:.1f}")
+        if product.worst_classification != "normal":
+            product_signals.append(f"worst sleeve {product.worst_classification}")
+
+    signals = {
+        "market": market_signals,
+        "macro": macro_signals,
+        "path": path_signals,
+        "behavior": behavior_signals,
+        "cross_border": cross_border_signals,
+        "product": product_signals,
+    }
+    statuses = {key: status(vals) for key, vals in signals.items()}
+    return statuses, signals
+
+
 def format_risk_overview_panel(validation: ValidationResult) -> str:
     metrics = validation.metrics
-    path = getattr(validation, "path_stress_results", [])
-    behavior = getattr(validation, "behavior_stress_results", [])
-    cross_border = getattr(validation, "cross_border_stress_results", [])
+    path = getattr(validation, "path_stress_results", []) or []
+    behavior = getattr(validation, "behavior_stress_results", []) or []
+    cross_border = getattr(validation, "cross_border_stress_results", []) or []
     product = getattr(validation, "product_risk", None)
+    layers, _ = _layer_statuses(validation)
 
     def line(status: str, text: str) -> str:
         return f"{status}|{text}"
 
     rows = [
-        line("red" if metrics.max_drawdown <= -0.20 else "yellow" if metrics.max_drawdown <= -0.10 else "green", f"市场：max drawdown {metrics.max_drawdown:.2%}，{metrics.drawdown_20pct_events} 次深回撤"),
-        line("red" if metrics.worst_rolling_5y_real_return < 0 else "yellow" if metrics.pain_index > 0.05 else "green", f"宏观：5y real return {metrics.worst_rolling_5y_real_return:.2%}，pain {metrics.pain_index:.2%}"),
-        line("red" if any(r.classification == "thesis-broken" for r in path) else "yellow" if any(r.classification != "normal" for r in path) else "green", f"路径：{len(path)} 个场景"),
-        line("red" if any(r.classification == "thesis-broken" for r in behavior) else "yellow" if any(r.triggered for r in behavior) else "green", f"行为：{len(behavior)} 条规则"),
-        line("red" if any(r.classification == "thesis-broken" for r in cross_border) else "yellow" if any(r.classification != "normal" for r in cross_border) else "green", f"跨境：{len(cross_border)} 个场景"),
-        line("red" if product is not None and product.worst_classification == "thesis-broken" else "yellow" if product is not None and product.worst_classification != "normal" else "green", f"产品：风险分数 {product.weighted_score:.1f}" if product is not None else "产品：未评估"),
+        line(layers["market"], f"市场：max drawdown {metrics.max_drawdown:.2%}，{metrics.drawdown_20pct_events} 次深回撤"),
+        line(layers["macro"], f"宏观：5y real return {metrics.worst_rolling_5y_real_return:.2%}，pain {metrics.pain_index:.2%}"),
+        line(layers["path"], f"路径：{len(path)} 个场景"),
+        line(layers["behavior"], f"行为：{len(behavior)} 条规则"),
+        line(layers["cross_border"], f"跨境：{len(cross_border)} 个场景"),
+        line(layers["product"], f"产品：风险分数 {product.weighted_score:.1f}" if product is not None else "产品：未评估"),
     ]
     red = [r.split("|", 1)[1] for r in rows if r.startswith("red|")]
     yellow = [r.split("|", 1)[1] for r in rows if r.startswith("yellow|")]
@@ -150,52 +235,46 @@ def format_risk_overview_panel(validation: ValidationResult) -> str:
 
 
 def format_risk_summary_page(validation: ValidationResult) -> str:
-    metrics = validation.metrics
-    path = getattr(validation, "path_stress_results", [])
-    behavior = getattr(validation, "behavior_stress_results", [])
-    cross_border = getattr(validation, "cross_border_stress_results", [])
-    product = getattr(validation, "product_risk", None)
+    layers, _ = _layer_statuses(validation)
+    red_layers = [name for name, key in [
+        ("市场价格与相关性压力", "market"),
+        ("宏观与购买力压力", "macro"),
+        ("路径依赖与再平衡失效", "path"),
+        ("投资者行为与执行纪律", "behavior"),
+        ("跨境访问与结算约束", "cross_border"),
+        ("产品层实现风险", "product"),
+    ] if layers.get(key) == "red"]
+    yellow_count = sum(1 for k in ("market", "macro", "path", "behavior", "cross_border", "product") if layers.get(k) == "yellow")
+    green_count = sum(1 for k in ("market", "macro", "path", "behavior", "cross_border", "product") if layers.get(k) == "green")
 
-    worst = []
-    if metrics.max_drawdown <= -0.20:
-        worst.append(f"最大回撤 {metrics.max_drawdown:.2%}")
-    if metrics.worst_rolling_5y_real_return < 0:
-        worst.append(f"5年真实收益 {metrics.worst_rolling_5y_real_return:.2%}")
-    if any(r.classification == "thesis-broken" for r in path):
-        worst.append("路径压力出现失效")
-    if any(r.triggered for r in behavior):
-        worst.append("行为规则触发")
-    if any(r.classification == "thesis-broken" for r in cross_border):
-        worst.append("跨境约束出现失效")
-    if product is not None and product.worst_classification == "thesis-broken":
-        worst.append("产品层风险失效")
+    if red_layers:
+        core = "；".join(red_layers[:3])
+    else:
+        core = "当前未见明确红色风险"
 
+    material = getattr(validation, "material_needs_review", None) or material_from_validation(validation)
     lines = [
         "## One-Page Risk Summary",
         "",
-        f"- 核心结论：{'；'.join(worst[:3]) if worst else '当前未见明确红色风险'}",
-        f"- 总体风险数：红 {sum(1 for x in worst)} / 黄 {len(getattr(validation, 'path_stress_results', [])) + len(getattr(validation, 'behavior_stress_results', [])) + len(getattr(validation, 'cross_border_stress_results', []))} / 绿 {len(RISK_MAP_ORDER)}",
+        f"- 核心结论：{core}",
+        f"- 总体风险数：红 {len(red_layers)} / 黄 {yellow_count} / 绿 {green_count}",
+        f"- Lockable：{'是' if getattr(validation, 'lockable', False) else '否'}",
         "",
         "### 需要优先处理",
     ]
-    if worst:
-        lines.extend([f"- {item}" for item in worst[:3]])
-    else:
-        lines.append("- —")
+    priority = material[:5] if material else []
+    lines.extend([f"- {item}" for item in priority] or ["- —"])
     lines.extend(["", "### 其次关注"])
-    secondary = []
-    if metrics.pain_index > 0.05:
-        secondary.append("回撤痛苦持续时间较长")
-    if metrics.longest_underwater_days > 252 * 2:
-        secondary.append("水下期偏长")
-    if getattr(validation, "product_risk", None) is not None and product.weighted_score >= 40:
-        secondary.append("产品层实现风险偏高")
-    if secondary:
-        lines.extend([f"- {item}" for item in secondary])
-    else:
-        lines.append("- —")
+    secondary = [item for item in (getattr(validation, "needs_review", None) or []) if item not in priority][:5]
+    lines.extend([f"- {item}" for item in secondary] or ["- —"])
     lines.append("")
     return "\n".join(lines)
+
+
+def material_from_validation(validation: ValidationResult) -> list[str]:
+    from quadbalance.lock_integrity import material_needs_review
+
+    return material_needs_review(list(getattr(validation, "needs_review", None) or []))
 
 
 def format_uncovered_risk_summary(validation: ValidationResult) -> str:
@@ -234,17 +313,9 @@ def format_lock_selection_notes(intended_profile: str | None) -> str:
         f"- Intended profile: {intended_profile or 'none (mechanical validity only)'}",
         "- Ranking keys (in order):",
     ]
-
-
-def format_lock_selection_notes(intended_profile: str | None) -> str:
-    lines = [
-        "## Lock Selection Ranking",
-        "",
-        f"- Intended profile: {intended_profile or 'none (mechanical validity only)'}",
-        "- Ranking keys (in order):",
-    ]
     for i, key in enumerate(LOCK_SELECTION_KEYS, start=1):
-        if intended_profile is None and i == 1:
+        # Key index 2 is suitability — skip when no intended profile.
+        if intended_profile is None and "suitability rank" in key:
             lines.append(f"  {i}. {key} — skipped for this run")
         else:
             lines.append(f"  {i}. {key}")
@@ -276,14 +347,20 @@ def format_stress_summary_markdown(stress_results: list[StressResult]) -> str:
     lines = [
         "## Stress Test Summary",
         "",
-        "| ID | Scenario | Portfolio Return | Classification | Threshold Basis | Liquidity Days | Notes | Reason |",
-        "|----|----------|------------------|----------------|-----------------|----------------|-------|--------|",
+        "| ID | Scenario | Portfolio Return | Classification | Mechanism | Threshold Basis | Liquidity Days | Notes | Reason |",
+        "|----|----------|------------------|----------------|-----------|-----------------|----------------|-------|--------|",
     ]
     for sr in stress_results:
         reason = "; ".join(sr.threshold_reasons) or "—"
         notes = "; ".join(sr.notes) or "—"
+        if sr.scenario_id in PATH_STRESS_IDS:
+            mechanism = "path-simulated"
+        elif sr.scenario_id in FORMULA_STRESS_IDS:
+            mechanism = "formula/closed-form"
+        else:
+            mechanism = "mixed/unspecified"
         lines.append(
-            f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | {sr.classification} | {sr.threshold_basis} | {sr.liquidity_impairment_days} | {notes} | {reason} |"
+            f"| {sr.scenario_id} | {sr.scenario_name} | {sr.portfolio_return:.2%} | {sr.classification} | {mechanism} | {sr.threshold_basis} | {sr.liquidity_impairment_days} | {notes} | {reason} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -296,65 +373,17 @@ def format_risk_map_markdown(validation: ValidationResult) -> str:
         "| Layer | Status | Focus | Most Vulnerable Signals |",
         "|------|--------|-------|--------------------------|",
     ]
-    metrics = validation.metrics
-    stress = validation.stress_results
-    path = getattr(validation, "path_stress_results", [])
-    behavior = getattr(validation, "behavior_stress_results", [])
-    cross_border = getattr(validation, "cross_border_stress_results", [])
-    product = getattr(validation, "product_risk", None)
-
-    def status(signals: list[str], yellow_hint: bool = False) -> str:
-        if any(s for s in signals):
-            if any("critical" in s or "failed" in s or "breach" in s or "frozen" in s for s in signals):
-                return "red"
-            if yellow_hint:
-                return "yellow"
-            return "yellow"
-        return "green"
-
-    market_signals: list[str] = []
-    if metrics.max_drawdown <= -0.20:
-        market_signals.append("critical: max drawdown exceeds 20%")
-    if metrics.drawdown_20pct_events > 0:
-        market_signals.append("multiple 20% drawdown episodes")
-    if any(sr.scenario_id in {"S13", "S14", "S19"} and sr.classification != "normal" for sr in stress):
-        market_signals.append("defensive sleeves lose hedge value")
-    macro_signals: list[str] = []
-    if metrics.worst_rolling_5y_real_return < 0:
-        macro_signals.append("critical: negative 5-year real return")
-    if metrics.pain_index > 0.05:
-        macro_signals.append("persistent drawdown pain")
-    if any(sr.scenario_id in {"S8", "S9", "S11", "S12", "S17"} and sr.classification != "normal" for sr in stress):
-        macro_signals.append("inflation / stagnation / purchasing power stress")
-    path_signals: list[str] = []
-    if any(r.classification != "normal" for r in path):
-        path_signals.append("rebalancing or cash conversion is blocked under stress")
-    if metrics.max_drawdown_recovery_days is None or metrics.max_drawdown_recovery_days > 252:
-        path_signals.append("long recovery time")
-    behavior_signals: list[str] = []
-    if any(r.triggered for r in behavior):
-        behavior_signals.append("behavioral rules trigger in deep drawdown")
-    if metrics.longest_underwater_days > 252 * 2:
-        behavior_signals.append("long underwater periods may challenge discipline")
-    cross_border_signals: list[str] = []
-    if any(r.classification != "normal" for r in cross_border):
-        cross_border_signals.append("critical: cross-border access or settlement constraints reduce usable value")
-    if any(r.frozen_asset_weight > 0 for r in cross_border):
-        cross_border_signals.append("frozen external-linked weight is non-zero")
-    product_signals: list[str] = []
-    if product is not None:
-        product_signals.append(f"weighted product risk score {product.weighted_score:.1f}")
-        if product.worst_classification != "normal":
-            product_signals.append(f"worst sleeve {product.worst_classification}")
-
-    rows = [
-        ("市场价格与相关性压力", status(market_signals, True), "; ".join(market_signals) or "—"),
-        ("宏观与购买力压力", status(macro_signals, True), "; ".join(macro_signals) or "—"),
-        ("路径依赖与再平衡失效", status(path_signals, True), "; ".join(path_signals) or "—"),
-        ("投资者行为与执行纪律", status(behavior_signals, False), "; ".join(behavior_signals) or "—"),
-        ("跨境访问与结算约束", status(cross_border_signals, True), "; ".join(cross_border_signals) or "—"),
-        ("产品层实现风险", status(product_signals, False), "; ".join(product_signals) or "—"),
-    ]
+    layers, signals = _layer_statuses(validation)
+    rows = []
+    for label, key in [
+        ("市场价格与相关性压力", "market"),
+        ("宏观与购买力压力", "macro"),
+        ("路径依赖与再平衡失效", "path"),
+        ("投资者行为与执行纪律", "behavior"),
+        ("跨境访问与结算约束", "cross_border"),
+        ("产品层实现风险", "product"),
+    ]:
+        rows.append((label, layers[key], "; ".join(signals[key]) or "—"))
     priority = sorted(
         rows,
         key=lambda row: {"red": 0, "yellow": 1, "green": 2}.get(row[1], 1),
@@ -366,7 +395,7 @@ def format_risk_map_markdown(validation: ValidationResult) -> str:
         "| Rank | Layer | Status | Suggested Action |",
         "|------|-------|--------|------------------|",
     ])
-    for idx, (label, sev, signals) in enumerate(priority, start=1):
+    for idx, (label, sev, _signals) in enumerate(priority, start=1):
         action = {
             "red": "Review the allocation, execution assumptions, and concentration immediately.",
             "yellow": "Monitor closely and consider adding margin or diversification.",
@@ -401,13 +430,14 @@ def format_behavior_stress_markdown(results: list[BehaviorStressResult]) -> str:
     lines = [
         "## Behavioral Stress Rules",
         "",
-        "| Rule | Triggered | Trigger Date | Adjusted Return | Pause Months | Classification | Reasons |",
-        "|------|-----------|--------------|-----------------|--------------|----------------|---------|",
+        "| Rule | Mode | Triggered | Trigger Date | Adjusted Return | Pause Months | Classification | Reasons |",
+        "|------|------|-----------|--------------|-----------------|--------------|----------------|---------|",
     ]
     for r in results:
         reasons = "; ".join(r.reasons) or "—"
+        mode = getattr(r, "evaluation_mode", "historical")
         lines.append(
-            f"| {r.name} | {'✓' if r.triggered else '✗'} | {r.trigger_date or '—'} | {r.adjusted_total_return:.2%} | {r.contribution_pause_months} | {r.classification} | {reasons} |"
+            f"| {r.name} | {mode} | {'✓' if r.triggered else '✗'} | {r.trigger_date or '—'} | {r.adjusted_total_return:.2%} | {r.contribution_pause_months} | {r.classification} | {reasons} |"
         )
     lines.append("")
     return "\n".join(lines)
