@@ -75,6 +75,6 @@ def test_lt1_sixty_forty_still_thesis_broken():
 
 
 def _prices_for(cfg: StrategyConfig):
-    syms = sorted(cfg.simulation_symbols())
+    syms = [s for s in sorted(cfg.symbols()) if s not in QDII_BACKUP_SYMBOLS]
     backup = sorted(set(QDII_BACKUP_SYMBOLS) | {s for s in cfg.simulation_symbols() if cfg.is_qdii_symbol(s)})
     return load_market_data(symbols=syms, backup_symbols=tuple(backup), use_cache=True)

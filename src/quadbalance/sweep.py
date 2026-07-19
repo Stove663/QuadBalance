@@ -14,22 +14,19 @@ from quadbalance.benchmarks import benchmark_comparison, run_benchmarks
 from quadbalance.config import StrategyConfig, generate_sweep_configs
 from quadbalance.asset_universe import QDII_BACKUP_SYMBOLS
 from quadbalance.data import load_market_data
-from quadbalance.cross_border_stress import run_cross_border_stress_tests
 from quadbalance.long_term_stress import SCENARIOS as LONG_TERM_SCENARIOS, run_long_term_scenario
-from quadbalance.metrics import PerformanceMetrics, cash_risk_free_rate, classify_suitability, compute_metrics
+from quadbalance.cross_border_stress import run_cross_border_stress_tests
+from quadbalance.metrics import PerformanceMetrics, cash_risk_free_rate, compute_metrics
+from quadbalance.orchestration_helpers import assess_product_risk, build_profile_suitability
 from quadbalance.product_risk import ProductRiskSummary
 from quadbalance.simulator import SimulationResult, simulate
 from quadbalance.stress import S4PathResult, StressResult, run_stress_tests
 from quadbalance.validation import ValidationResult, evaluate_acceptance
-from quadbalance.sweep_constants import ARTIFACT_MANIFEST_FILENAME, ARTIFACTS_DIRNAME, SWEEP_RESULTS_FILENAME
+from quadbalance.sweep_artifacts import sweep_artifact_paths, sweep_validation_projection
+from quadbalance.sweep_constants import SWEEP_RESULTS_FILENAME
+from quadbalance.lock_selection import prefer_lock_candidate
 
 RobustnessVerdict = Literal["robust", "sensitive", "fragile", "thesis-broken"]
-
-
-def prefer_lock_candidate(current, candidate, intended_profile: str | None = None):
-    from quadbalance.lock_selection import prefer_lock_candidate as _prefer_lock_candidate
-
-    return _prefer_lock_candidate(current, candidate, intended_profile)
 
 
 @dataclass(frozen=True)
@@ -91,16 +88,9 @@ class RobustnessSweepResult:
     valuation_cases: list[dict[str, object]] = field(default_factory=list)
 
 
-def load_profile_thresholds(profile_thresholds_path: Path | None):
-    from quadbalance.profile_thresholds import DEFAULT_INVESTOR_PROFILES
-
-    return DEFAULT_INVESTOR_PROFILES
-
-
 def run_path_stress_tests(*args, **kwargs) -> list[Any]:
     from quadbalance.path_stress import run_path_stress_tests as _run_path_stress_tests
 
-    # Sweep historically passed (config, prices, ...); real API is config-only.
     config = args[0] if args else kwargs.get("config")
     return _run_path_stress_tests(config)
 
@@ -109,12 +99,6 @@ def run_behavior_stress_tests(*args, **kwargs) -> list[Any]:
     from quadbalance.behavior_stress import run_behavior_stress_tests as _run_behavior_stress_tests
 
     return _run_behavior_stress_tests(*args, **kwargs)
-
-
-def assess_product_risk(*args, **kwargs) -> ProductRiskSummary | None:
-    from quadbalance.product_risk import assess_product_risk as _assess_product_risk
-
-    return _assess_product_risk(*args, **kwargs)
 
 
 def run_long_term_stress_tests(config: StrategyConfig, prices: pd.DataFrame):
@@ -246,27 +230,7 @@ def run_robustness_sweep(prices: pd.DataFrame, config: StrategyConfig, inflation
 
 
 def _build_profile_suitability(config: StrategyConfig, metrics: PerformanceMetrics, sim_result, profile_thresholds_path: Path | None) -> dict[str, dict[str, list[str] | str]]:
-    investor_profiles = load_profile_thresholds(profile_thresholds_path)
-    suitability = classify_suitability(
-        config=config,
-        metrics=metrics,
-        qdii_fill_rate=getattr(sim_result.qdii_metrics, "qdii_fill_rate", 1.0),
-        avg_qdii_weight_gap=getattr(sim_result.qdii_metrics, "avg_qdii_weight_gap", 0.0),
-        qdii_friction_months=getattr(sim_result.qdii_metrics, "qdii_friction_months", 0),
-        qdii_recovery_months=getattr(sim_result.qdii_metrics, "qdii_recovery_months", 0),
-        investor_profiles=investor_profiles,
-        sequence_risk={},
-    )
-    return {
-        profile_id: {
-            "classification": item.classification,
-            "reasons": item.reasons,
-            "drivers": item.drivers,
-            "warnings": item.warnings,
-            "governance_notes": item.governance_notes,
-        }
-        for profile_id, item in suitability.items()
-    }
+    return build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
 
 
 def collect_required_symbols(configs: list[StrategyConfig]) -> list[str]:
@@ -278,7 +242,7 @@ def collect_required_symbols(configs: list[StrategyConfig]) -> list[str]:
         symbols.update(config.symbols())
     forbidden = symbols & set(QDII_BACKUP_SYMBOLS)
     if forbidden:
-        raise ValueError(f"Alignment symbols must not include QDII backups: {sorted(forbidden)}")
+        raise ValueError(f"Alignment price matrix must not include QDII backups: {sorted(forbidden)}")
     return sorted(symbols)
 
 
@@ -327,40 +291,12 @@ def _build_sweep_row(config: StrategyConfig, sim_result, metrics, validation, st
         "avg_qdii_weight_gap": getattr(qdii, "avg_qdii_weight_gap", None),
         "qdii_friction_months": getattr(qdii, "qdii_friction_months", 0),
         "qdii_recovery_months": getattr(qdii, "qdii_recovery_months", 0),
-        "validation_stage": validation_stage,
-        "validation_passed": validation.passed,
-        "failure_reasons": "; ".join(validation.failure_reasons),
-        "needs_review": "; ".join(getattr(validation, "needs_review", []) or []),
-        "material_needs_review": "; ".join(getattr(validation, "material_needs_review", []) or []),
-        "lockable": getattr(validation, "lockable", False),
-        "qdii_pending_days_gate": (
-            "fail"
-            if (getattr(qdii, "pending_cash_days", 0) or 0) > 252
-            else "pass"
-        ),
-        "qdii_weight_gap_gate": (
-            "fail"
-            if (getattr(qdii, "qdii_friction_months", 0) or 0) >= 12
-            and abs(getattr(qdii, "avg_qdii_weight_gap", 0.0) or 0.0) > 0.02
-            else "pass"
-        ),
-        "boundary_macro": validation.boundary_classifications.get("macro", ""),
-        "boundary_behavioral": validation.boundary_classifications.get("behavioral", ""),
-        "boundary_real_return": validation.boundary_classifications.get("real_return", ""),
-        "accumulation_classification": validation.profile_suitability.get("accumulation", {}).get("classification", ""),
-        "balanced_core_classification": validation.profile_suitability.get("balanced_core", {}).get("classification", ""),
-        "pre_retirement_preservation_classification": validation.profile_suitability.get("pre_retirement_preservation", {}).get("classification", ""),
-        "retirement_withdrawal_classification": validation.profile_suitability.get("retirement_withdrawal", {}).get("classification", ""),
-        "stress_fail_count": sum(1 for s in stress_results if s.classification in {"fail", "thesis-broken"}),
-        "path_fail_count": sum(1 for s in path_results if getattr(s, "classification", "normal") in {"fail", "thesis-broken"}),
-        "behavior_fail_count": sum(1 for s in behavior_results if getattr(s, "classification", "normal") in {"fail", "thesis-broken"}),
-        "cross_border_fail_count": sum(1 for s in cross_border_results if getattr(s, "classification", "normal") in {"fail", "thesis-broken"}),
+        **sweep_validation_projection(validation, qdii),
         "product_risk_score": getattr(product_risk, "weighted_score", None),
         "product_risk_classification": getattr(product_risk, "worst_classification", ""),
     }
-    if artifacts_dir is not None:
-        row["artifact_manifest"] = str(artifacts_dir / ARTIFACT_MANIFEST_FILENAME)
-        row["artifact_bundle"] = str(artifacts_dir)
+    row["validation_stage"] = validation_stage
+    row.update(sweep_artifact_paths(artifacts_dir))
     return row
 
 
@@ -390,6 +326,12 @@ def _run_one_config(
         f"dca={config.dca_method} rebalance={config.rebalance_threshold:.0%}",
         flush=True,
     )
+    try:
+        benchmarks = run_benchmarks(prices)
+        risk_free_annual = cash_risk_free_rate(prices)
+    except KeyError:
+        benchmarks = {}
+        risk_free_annual = 0.0
     sim_result = simulate(prices, config, backup_prices=backup_prices)
     metrics = compute_metrics(sim_result, config, prices, risk_free_annual=risk_free_annual, inflation_annual=0.03)
     validation = ValidationResult(
@@ -415,10 +357,8 @@ def _run_one_config(
         return row, validation, config, sim_result, True
 
     stress_results, _ = run_stress_tests(config, sim_result, prices, backup_prices=backup_prices)
-    path_results = run_path_stress_tests(config, prices, backup_prices=backup_prices)
-    behavior_results = run_behavior_stress_tests(
-        sim_result, metrics, path_results=path_results, stress_results=stress_results
-    )
+    path_results = run_path_stress_tests(config)
+    behavior_results = run_behavior_stress_tests(sim_result, metrics, path_results=path_results, stress_results=stress_results)
     cross_border_results = run_cross_border_stress_tests(config)
     product_risk = assess_product_risk(config)
 
@@ -434,11 +374,7 @@ def _run_one_config(
         qdii_metrics=sim_result.qdii_metrics,
         rebalance_metrics=sim_result.rebalance_metrics,
     )
-    # LT1–LT3 deferred to lock selection in run_sweep (skip for all sweep candidates).
     validation.long_term_results = []
-    validation.benchmark_comparison = benchmark_comparison(metrics, benchmarks)
-    validation.profile_suitability = _build_profile_suitability(config, metrics, sim_result, profile_thresholds_path)
-
     artifacts_dir = None
     row = _build_sweep_row(config, sim_result, metrics, validation, stress_results, path_results, behavior_results, cross_border_results, product_risk, "deep-validated", artifacts_dir)
     return row, validation, config, sim_result, False
@@ -502,11 +438,7 @@ def run_sweep(
                         "profile_suitability": validation.profile_suitability,
                         "lockable": getattr(validation, "lockable", False),
                         "stock_sub_split": config.stock_sub_split,
-                        "material_needs_review": list(
-                            getattr(validation, "material_needs_review", None)
-                            or getattr(validation, "needs_review", None)
-                            or []
-                        ),
+                        "material_needs_review": list(getattr(validation, "material_needs_review", None) or getattr(validation, "needs_review", None) or []),
                         "artifacts_dir": str(output_dir / "artifacts"),
                     }
                 )
@@ -546,8 +478,8 @@ def run_sweep(
             df.loc[df["config_id"] == config.config_id, "material_needs_review"] = "; ".join(
                 getattr(validation, "material_needs_review", []) or []
             )
-            df.loc[df["config_id"] == config.config_id, "artifact_manifest"] = str(output_dir / ARTIFACTS_DIRNAME / ARTIFACT_MANIFEST_FILENAME)
-            df.loc[df["config_id"] == config.config_id, "artifact_bundle"] = str(output_dir / ARTIFACTS_DIRNAME)
+            df.loc[df["config_id"] == config.config_id, "artifact_manifest"] = str(output_dir / "artifacts" / "manifest.json")
+            df.loc[df["config_id"] == config.config_id, "artifact_bundle"] = str(output_dir / "artifacts")
             df.to_csv(output_dir / SWEEP_RESULTS_FILENAME, index=False)
         return df, validation, config
 

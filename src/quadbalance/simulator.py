@@ -194,6 +194,8 @@ def _buy(
         if ctx is not None and dt is not None:
             ctx.lots.setdefault(symbol, []).append(ShareLot(dt, buy_shares, settled=True))
     else:
+        if ctx.unsettled_cash > 0:
+            ctx.unsettled_cash = max(0.0, ctx.unsettled_cash - amount)
         ctx.pending_settle_shares[symbol] = ctx.pending_settle_shares.get(symbol, 0.0) + buy_shares
         ctx.lots.setdefault(symbol, []).append(ShareLot(dt, buy_shares, settled=False))
     return 0.0
@@ -398,9 +400,10 @@ def _process_qdii_backlog(shares: dict[str, float], day_prices: pd.Series, confi
         return
     _sell(shares, CASH_SYMBOL, attempt, day_prices[CASH_SYMBOL], ctx=ctx, dt=dt)
     unfilled = _buy_qdii_with_quota(shares, attempt, day_prices, config, ctx, dt, count_intended=False)
+    spent = attempt - unfilled
+    if spent > 0:
+        ctx.unsettled_cash = max(0.0, ctx.unsettled_cash - spent)
     ctx.qdii_backlog = unfilled
-    if unfilled > 0:
-        _park_in_cash(shares, unfilled, day_prices, ctx=ctx, dt=dt, settle_immediate=True)
 
 
 def _handle_qdii_unfilled(
